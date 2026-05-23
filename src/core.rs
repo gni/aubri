@@ -5,17 +5,20 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn};
 
 const KDF_CONTEXT: &str = "aubri_p2p_audio_v2";
 const MAX_QUEUE_DEPTH: usize = 16;
-const MAX_LATENCY_MS: usize = 100; 
-const PREBUFFER_MS: usize = 60;
-const HARDWARE_BUFFER_FRAMES: u32 = 512;
-const MAX_SAFE_PAYLOAD_BYTES: usize = 1_000_000;
+const MAX_LATENCY_MS: usize = 60;
+const PREBUFFER_MS: usize = 20;
+const HARDWARE_BUFFER_FRAMES: u32 = 256;
+const MAX_SAFE_PAYLOAD_BYTES: usize = 2048;
+
+const HANDSHAKE_REQ: &[u8] = b"AUBRI_REQ";
+const HANDSHAKE_ACK: &[u8] = b"AUBRI_ACK";
 
 #[derive(Default, Clone)]
 pub struct Telemetry {
@@ -140,14 +143,27 @@ fn resolve_output_device(host: &cpal::Host, requested_device: &Option<String>) -
     Err("No available unlocked output devices found. Verify execution state.".to_string())
 }
 
-pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
+pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, protocol: &str, telemetry: Arc<Mutex<Telemetry>>) {
+    if protocol.to_lowercase() == "tcp" {
+        run_server_tcp(host, bind, secret, device_name, sample_rate_override, telemetry);
+    } else {
+        run_server_udp(host, bind, secret, device_name, sample_rate_override, telemetry);
+    }
+}
+
+pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, protocol: &str, telemetry: Arc<Mutex<Telemetry>>) {
+    if protocol.to_lowercase() == "tcp" {
+        run_client_tcp(host, address, secret, device_name, sample_rate_override, telemetry);
+    } else {
+        run_client_udp(host, address, secret, device_name, sample_rate_override, telemetry);
+    }
+}
+
+fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, supported_config) = match resolve_input_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() {
-                tel.status = format!("Input failure: {}", e);
-                tel.is_running = false;
-            }
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Input failure: {}", e); tel.is_running = false; }
             error!(error = %e, "Input device resolution failed");
             return;
         }
@@ -155,17 +171,14 @@ pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
 
     let mut config: cpal::StreamConfig = supported_config.into();
     config.buffer_size = cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES);
-
-    if let Some(hz) = sample_rate_override {
-        config.sample_rate = cpal::SampleRate(hz);
-    }
+    if let Some(hz) = sample_rate_override { config.sample_rate = cpal::SampleRate(hz); }
 
     let sample_rate = config.sample_rate.0;
     let channels = config.channels;
 
     if let Ok(mut tel) = telemetry.lock() {
         tel.is_running = true;
-        tel.mode = "Server".to_string();
+        tel.mode = "Server (TCP)".to_string();
         tel.sample_rate = sample_rate;
         tel.channels = channels;
         tel.status = "Binding address interfaces...".to_string();
@@ -176,66 +189,35 @@ pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     let listener = match TcpListener::bind(bind) {
         Ok(l) => l,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() {
-                tel.status = format!("Network bind failure: {}", e);
-                tel.is_running = false;
-            }
-            error!(error = %e, bind = %bind, "Network binding failed on target interface");
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Network bind failure: {}", e); tel.is_running = false; }
+            error!(error = %e, bind = %bind, "Network binding failed");
             return;
         }
     };
     
-    if let Ok(mut tel) = telemetry.lock() {
-        tel.status = "Awaiting inbound connection...".to_string();
-    }
-    info!(bind = %bind, "Listening securely for incoming client connections");
+    if let Ok(mut tel) = telemetry.lock() { tel.status = "Awaiting inbound connection...".to_string(); }
+    info!(bind = %bind, "Listening securely for incoming client connections (TCP)");
 
-    if listener.set_nonblocking(true).is_err() {
-        warn!("Failed to set non-blocking mode on listener.");
-    }
+    let _ = listener.set_nonblocking(true);
 
     let (mut stream, addr) = loop {
-        if let Ok(guard) = telemetry.lock() {
-            if !guard.is_running {
-                info!("Server configuration loop halted by user.");
-                return;
-            }
-        }
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { return; } }
         match listener.accept() {
-            Ok((s, a)) => {
-                let _ = s.set_nonblocking(false);
-                break (s, a);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+            Ok((s, a)) => { let _ = s.set_nonblocking(false); break (s, a); }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(100)),
             Err(e) => {
-                if let Ok(mut tel) = telemetry.lock() {
-                    tel.status = format!("Socket negotiation error: {}", e);
-                    tel.is_running = false;
-                }
-                error!(error = %e, "Internal networking socket negotiation failure");
+                if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Socket error: {}", e); tel.is_running = false; }
                 return;
             }
         }
     };
 
-    if let Ok(mut tel) = telemetry.lock() {
-        tel.status = format!("Connected to remote client: {}", addr);
-    }
-    info!(client_addr = %addr, "Authenticated handshake tunnel established. Ephemeral session key generated.");
-
-    if let Err(e) = stream.set_nodelay(true) {
-        warn!(error = %e, "Failed to disable TCP Nagle's algorithm.");
-    }
+    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Connected to remote client: {}", addr); }
+    let _ = stream.set_nodelay(true);
 
     let mut salt = [0u8; 32];
     OsRng.fill_bytes(&mut salt);
-    
-    if stream.write_all(&salt).is_err() {
-        if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; }
-        return;
-    }
+    if stream.write_all(&salt).is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
 
     let session_key = derive_session_key(secret, &salt);
     let cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
@@ -245,144 +227,73 @@ pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
         return;
     }
 
-    info!(
-        device = %device.name().unwrap_or_else(|_| "Unknown".to_string()),
-        sample_rate = %sample_rate,
-        channels = %channels,
-        "Allocated secure input hardware interface. Streaming commenced with 16-bit PCM Quantization."
-    );
-
     let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(MAX_QUEUE_DEPTH);
     let tx_primary = tx.clone();
 
-    let audio_stream = match device.build_input_stream(
+    let audio_stream = device.build_input_stream(
         &config,
         move |data: &[f32], _: &_| {
-            let pcm_16: Vec<i16> = data.iter()
-                .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-                .collect();
-                
+            let pcm_16: Vec<i16> = data.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
             let _ = tx_primary.try_send(pcm_16);
         },
-        |err| error!(error = %err, "Hardware capture stream exception"),
+        |err| error!(error = %err, "Hardware capture exception"),
         None,
-    ) {
-        Ok(stream) => stream,
-        Err(_) => {
-            config.buffer_size = cpal::BufferSize::Default;
-            match device.build_input_stream(
-                &config,
-                move |data: &[f32], _: &_| {
-                    let pcm_16: Vec<i16> = data.iter()
-                        .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-                        .collect();
-                    let _ = tx.try_send(pcm_16);
-                },
-                |err| error!(error = %err, "Hardware capture stream exception"),
-                None,
-            ) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    if let Ok(mut tel) = telemetry.lock() {
-                        tel.status = format!("Audio hardware interface build crashed: {}", e);
-                        tel.is_running = false;
-                    }
-                    return;
-                }
-            }
-        }
-    };
+    ).unwrap();
 
-    if audio_stream.play().is_err() {
-        if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; }
-        return;
-    }
+    if audio_stream.play().is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
 
     let mut counter: u64 = 0;
-
     loop {
-        if let Ok(guard) = telemetry.lock() {
-            if !guard.is_running {
-                info!("Server termination sequence triggered. Dropping active endpoints.");
-                break;
-            }
-        }
-
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { break; } }
         match rx.recv_timeout(std::time::Duration::from_millis(250)) {
             Ok(raw_i16) => {
                 let raw_bytes: &[u8] = bytemuck::cast_slice(&raw_i16);
                 let nonce = generate_nonce(counter);
-                
-                match cipher.encrypt(&nonce, raw_bytes) {
-                    Ok(ciphertext) => {
-                        let len = ciphertext.len() as u32;
-                        let mut packet = Vec::with_capacity(4 + ciphertext.len());
-                        packet.extend_from_slice(&len.to_le_bytes());
-                        packet.extend_from_slice(&ciphertext);
-                        
-                        if stream.write_all(&packet).is_err() {
-                            warn!("Client connection closed or severed via pipeline interruption.");
-                            break;
-                        }
-                        
-                        counter += 1;
-                        if let Ok(mut tel) = telemetry.lock() {
-                            tel.packets_processed = counter;
-                            tel.bytes_processed += packet.len() as u64;
-                        }
-                    }
-                    Err(_) => {}
+                if let Ok(ciphertext) = cipher.encrypt(&nonce, raw_bytes) {
+                    let len = ciphertext.len() as u32;
+                    let mut packet = Vec::with_capacity(4 + ciphertext.len());
+                    packet.extend_from_slice(&len.to_le_bytes());
+                    packet.extend_from_slice(&ciphertext);
+                    
+                    if stream.write_all(&packet).is_err() { break; }
+                    counter += 1;
+                    if let Ok(mut tel) = telemetry.lock() { tel.packets_processed = counter; tel.bytes_processed += packet.len() as u64; }
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(_) => break,
         }
     }
-    
-    if let Ok(mut tel) = telemetry.lock() {
-        tel.is_running = false;
-        tel.status = "Session terminated contextually.".to_string();
-    }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
 }
 
-pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
+fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, _) = match resolve_output_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() {
-                tel.status = format!("Output interface failure: {}", e);
-                tel.is_running = false;
-            }
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Output interface failure: {}", e); tel.is_running = false; }
             return;
         }
     };
 
     if let Ok(mut tel) = telemetry.lock() {
         tel.is_running = true;
-        tel.mode = "Client".to_string();
+        tel.mode = "Client (TCP)".to_string();
         tel.status = format!("Routing outbound socket connection to {}...", address);
         tel.packets_processed = 0;
         tel.bytes_processed = 0;
     }
-    info!(address = %address, "Establishing network connection context with host");
     
     let mut stream = match TcpStream::connect(address) {
         Ok(s) => s,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() {
-                tel.status = format!("Connection failed: {}", e);
-                tel.is_running = false;
-            }
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Connection failed: {}", e); tel.is_running = false; }
             return;
         }
     };
 
-    if let Err(e) = stream.set_nodelay(true) {
-        warn!(error = %e, "Failed to disable TCP Nagle's algorithm.");
-    }
-    if let Err(e) = stream.set_read_timeout(Some(std::time::Duration::from_millis(250))) {
-        warn!(error = %e, "Failed to inject read timeouts into socket.");
-    }
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(250)));
 
     let mut salt = [0u8; 32];
     loop {
@@ -408,15 +319,10 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
             Err(_) => return,
         }
     }
-    
-    if stream.read_exact(&mut ch_buf).is_err() {
-        if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; }
-        return;
-    }
+    if stream.read_exact(&mut ch_buf).is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
 
     let negotiated_rate = u32::from_le_bytes(sr_buf);
     let channels = u16::from_le_bytes(ch_buf);
-
     let final_sample_rate = sample_rate_override.unwrap_or(negotiated_rate);
 
     let config = cpal::StreamConfig {
@@ -436,10 +342,315 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
         tel.max_buffer_capacity = max_jitter_buffer_samples;
         tel.status = "Synchronized cryptographic handshake. Audio streaming active.".to_string();
     }
-    info!("Connected. Secure cryptographic handshake verified.");
 
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
+    let jitter_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(max_jitter_buffer_samples * 2)));
+    let rx_shared = Arc::new(Mutex::new(rx));
+    let is_prebuffering = Arc::new(Mutex::new(true));
+
+    let jb_primary = Arc::clone(&jitter_buffer);
+    let rx_primary = Arc::clone(&rx_shared);
+    let pb_primary = Arc::clone(&is_prebuffering);
+    let tel_callback = Arc::clone(&telemetry);
+
+    let audio_stream = device.build_output_stream(
+        &config,
+        move |data: &mut [f32], _: &_| {
+            let mut frames_needed = data.len();
+            let mut data_idx = 0;
+
+            if let Ok(rx_guard) = rx_primary.try_lock() {
+                while let Ok(decrypted_bytes) = rx_guard.try_recv() {
+                    let incoming = decrypted_bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32);
+                    if let Ok(mut jb_guard) = jb_primary.try_lock() { jb_guard.extend(incoming); }
+                }
+            }
+
+            if let Ok(mut jb_guard) = jb_primary.try_lock() {
+                if jb_guard.len() > max_jitter_buffer_samples {
+                    let overflow = jb_guard.len() - max_jitter_buffer_samples;
+                    jb_guard.drain(0..overflow);
+                }
+                if let Ok(mut tel) = tel_callback.try_lock() { tel.jitter_buffer_len = jb_guard.len(); }
+
+                if let Ok(mut pb_guard) = pb_primary.try_lock() {
+                    if *pb_guard {
+                        if jb_guard.len() >= prebuffer_target_samples { *pb_guard = false; } else { data.fill(0.0); return; }
+                    }
+                }
+
+                let take = std::cmp::min(frames_needed, jb_guard.len());
+                for i in 0..take { data[data_idx + i] = jb_guard.pop_front().unwrap(); }
+                data_idx += take;
+                frames_needed -= take;
+
+                if frames_needed > 0 {
+                    for i in 0..frames_needed { data[data_idx + i] = 0.0; }
+                }
+            } else { data.fill(0.0); }
+        },
+        |err| error!(error = %err, "Playback stream exception"),
+        None,
+    ).unwrap();
+
+    if audio_stream.play().is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
+
+    let mut counter: u64 = 0;
+    let mut len_buf = [0u8; 4];
+
+    loop {
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { break; } }
+        match stream.read_exact(&mut len_buf) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => break,
+        }
+        
+        let chunk_len = u32::from_le_bytes(len_buf) as usize;
+        if chunk_len > MAX_SAFE_PAYLOAD_BYTES { break; }
+
+        let mut ciphertext = vec![0u8; chunk_len];
+        if stream.read_exact(&mut ciphertext).is_err() { break; }
+
+        let nonce = generate_nonce(counter);
+        match cipher.decrypt(&nonce, ciphertext.as_ref()) {
+            Ok(plaintext) => {
+                let _ = tx.try_send(plaintext);
+                counter += 1;
+                if let Ok(mut tel) = telemetry.lock() {
+                    tel.packets_processed = counter;
+                    tel.bytes_processed += 4 + chunk_len as u64;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
+}
+
+fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
+    let (device, supported_config) = match resolve_input_device(&host, &device_name) {
+        Ok(res) => res,
+        Err(e) => {
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Input failure: {}", e); tel.is_running = false; }
+            error!(error = %e, "Input device resolution failed");
+            return;
+        }
+    };
+
+    let mut config: cpal::StreamConfig = supported_config.into();
+    config.buffer_size = cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES);
+
+    if let Some(hz) = sample_rate_override {
+        config.sample_rate = cpal::SampleRate(hz);
+    }
+
+    let sample_rate = config.sample_rate.0;
+    let channels = config.channels;
+
+    if let Ok(mut tel) = telemetry.lock() {
+        tel.is_running = true;
+        tel.mode = "Server (UDP)".to_string();
+        tel.sample_rate = sample_rate;
+        tel.channels = channels;
+        tel.status = "Binding address interfaces...".to_string();
+        tel.packets_processed = 0;
+        tel.bytes_processed = 0;
+    }
+
+    let socket = match UdpSocket::bind(bind) {
+        Ok(s) => s,
+        Err(e) => {
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Network bind failure: {}", e); tel.is_running = false; }
+            error!(error = %e, bind = %bind, "Network binding failed on target interface");
+            return;
+        }
+    };
     
+    if let Ok(mut tel) = telemetry.lock() { tel.status = "Awaiting inbound UDP handshake...".to_string(); }
+    info!(bind = %bind, "Listening securely for incoming UDP connection requests");
+
+    if let Err(e) = socket.set_read_timeout(Some(std::time::Duration::from_millis(250))) { warn!(error = %e, "Failed to apply non-blocking timeouts to socket"); }
+
+    let mut buf = [0u8; 1024];
+    
+    let client_addr = loop {
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { info!("Server configuration loop halted by user."); return; } }
+        match socket.recv_from(&mut buf) {
+            Ok((size, addr)) => {
+                if size == HANDSHAKE_REQ.len() && &buf[0..size] == HANDSHAKE_REQ {
+                    break addr;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(e) => { error!(error = %e, "Socket read exception during handshake"); }
+        }
+    };
+
+    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Connected to remote client: {}", client_addr); }
+    info!(client_addr = %client_addr, "Handshake request verified. Deriving ephemeral session key.");
+
+    let mut salt = [0u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    let session_key = derive_session_key(secret, &salt);
+    let cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
+
+    let mut ack_packet = Vec::with_capacity(HANDSHAKE_ACK.len() + 32 + 4 + 2);
+    ack_packet.extend_from_slice(HANDSHAKE_ACK);
+    ack_packet.extend_from_slice(&salt);
+    ack_packet.extend_from_slice(&sample_rate.to_le_bytes());
+    ack_packet.extend_from_slice(&channels.to_le_bytes());
+
+    for _ in 0..5 { let _ = socket.send_to(&ack_packet, client_addr); std::thread::sleep(std::time::Duration::from_millis(10)); }
+
+    let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(MAX_QUEUE_DEPTH);
+    let tx_primary = tx.clone();
+
+    let audio_stream = match device.build_input_stream(
+        &config,
+        move |data: &[f32], _: &_| {
+            let pcm_16: Vec<i16> = data.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
+            let _ = tx_primary.try_send(pcm_16);
+        },
+        |err| error!(error = %err, "Hardware capture stream exception"),
+        None,
+    ) {
+        Ok(stream) => stream,
+        Err(_) => {
+            config.buffer_size = cpal::BufferSize::Default;
+            match device.build_input_stream(
+                &config,
+                move |data: &[f32], _: &_| {
+                    let pcm_16: Vec<i16> = data.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
+                    let _ = tx.try_send(pcm_16);
+                },
+                |err| error!(error = %err, "Hardware capture stream exception"),
+                None,
+            ) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Audio hardware interface build crashed: {}", e); tel.is_running = false; }
+                    return;
+                }
+            }
+        }
+    };
+
+    if audio_stream.play().is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
+
+    let mut counter: u64 = 0;
+
+    loop {
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { break; } }
+        match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(raw_i16) => {
+                let raw_bytes: &[u8] = bytemuck::cast_slice(&raw_i16);
+                counter += 1;
+                let nonce = generate_nonce(counter);
+                
+                match cipher.encrypt(&nonce, raw_bytes) {
+                    Ok(ciphertext) => {
+                        let mut packet = Vec::with_capacity(8 + ciphertext.len());
+                        packet.extend_from_slice(&counter.to_le_bytes());
+                        packet.extend_from_slice(&ciphertext);
+                        let _ = socket.send_to(&packet, client_addr);
+                        
+                        if let Ok(mut tel) = telemetry.lock() { tel.packets_processed = counter; tel.bytes_processed += packet.len() as u64; }
+                    }
+                    Err(_) => {}
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session terminated contextually.".to_string(); }
+}
+
+fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
+    let (device, _) = match resolve_output_device(&host, &device_name) {
+        Ok(res) => res,
+        Err(e) => {
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Output interface failure: {}", e); tel.is_running = false; }
+            return;
+        }
+    };
+
+    if let Ok(mut tel) = telemetry.lock() {
+        tel.is_running = true;
+        tel.mode = "Client (UDP)".to_string();
+        tel.status = format!("Routing outbound socket connection to {}...", address);
+        tel.packets_processed = 0;
+        tel.bytes_processed = 0;
+    }
+    
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => {
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Local socket bind failed: {}", e); tel.is_running = false; }
+            return;
+        }
+    };
+
+    if let Err(e) = socket.connect(address) {
+        if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Failed to route UDP to target address: {}", e); tel.is_running = false; }
+        return;
+    }
+
+    if let Err(e) = socket.set_read_timeout(Some(std::time::Duration::from_millis(500))) { warn!(error = %e, "Failed to inject read timeouts into socket."); }
+
+    let mut buf = [0u8; MAX_SAFE_PAYLOAD_BYTES];
+    let expected_ack_size = HANDSHAKE_ACK.len() + 32 + 4 + 2;
+
+    let (salt, negotiated_rate, channels) = loop {
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { return; } }
+        let _ = socket.send(HANDSHAKE_REQ);
+
+        match socket.recv(&mut buf) {
+            Ok(size) => {
+                if size == expected_ack_size && &buf[0..HANDSHAKE_ACK.len()] == HANDSHAKE_ACK {
+                    let mut offset = HANDSHAKE_ACK.len();
+                    
+                    let mut s = [0u8; 32];
+                    s.copy_from_slice(&buf[offset..offset + 32]); 
+                    offset += 32;
+                    
+                    let mut sr_buf = [0u8; 4]; 
+                    sr_buf.copy_from_slice(&buf[offset..offset + 4]); 
+                    let nr = u32::from_le_bytes(sr_buf); 
+                    offset += 4;
+                    
+                    let mut ch_buf = [0u8; 2]; 
+                    ch_buf.copy_from_slice(&buf[offset..offset + 2]); 
+                    let ch = u16::from_le_bytes(ch_buf);
+                    
+                    break (s, nr, ch);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => return,
+        }
+    };
+
+    let session_key = derive_session_key(secret, &salt);
+    let cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
+    let final_sample_rate = sample_rate_override.unwrap_or(negotiated_rate);
+
+    let config = cpal::StreamConfig { channels, sample_rate: cpal::SampleRate(final_sample_rate), buffer_size: cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES) };
+    let sample_rate_sz = final_sample_rate as usize;
+    let channels_sz = channels as usize;
+    let max_jitter_buffer_samples = (sample_rate_sz * channels_sz * MAX_LATENCY_MS) / 1000;
+    let prebuffer_target_samples = (sample_rate_sz * channels_sz * PREBUFFER_MS) / 1000;
+
+    if let Ok(mut tel) = telemetry.lock() {
+        tel.sample_rate = final_sample_rate;
+        tel.channels = channels;
+        tel.max_buffer_capacity = max_jitter_buffer_samples;
+        tel.status = "Synchronized UDP cryptographic handshake. Audio streaming active.".to_string();
+    }
+
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
     let jitter_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(max_jitter_buffer_samples * 2)));
     let rx_shared = Arc::new(Mutex::new(rx));
     let is_prebuffering = Arc::new(Mutex::new(true));
@@ -457,14 +668,8 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
 
             if let Ok(rx_guard) = rx_primary.try_lock() {
                 while let Ok(decrypted_bytes) = rx_guard.try_recv() {
-                    let incoming = decrypted_bytes.chunks_exact(2)
-                        .map(|b| {
-                            let sample = i16::from_le_bytes([b[0], b[1]]);
-                            sample as f32 / i16::MAX as f32
-                        });
-                    if let Ok(mut jb_guard) = jb_primary.try_lock() {
-                        jb_guard.extend(incoming);
-                    }
+                    let incoming = decrypted_bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32);
+                    if let Ok(mut jb_guard) = jb_primary.try_lock() { jb_guard.extend(incoming); }
                 }
             }
 
@@ -474,40 +679,21 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
                     jb_guard.drain(0..overflow);
                 }
                 
-                if let Ok(mut tel) = tel_callback.try_lock() {
-                    tel.jitter_buffer_len = jb_guard.len();
-                }
+                if let Ok(mut tel) = tel_callback.try_lock() { tel.jitter_buffer_len = jb_guard.len(); }
 
                 if let Ok(mut pb_guard) = pb_primary.try_lock() {
-                    if *pb_guard {
-                        if jb_guard.len() >= prebuffer_target_samples {
-                            *pb_guard = false;
-                        } else {
-                            data.fill(0.0);
-                            return;
-                        }
-                    }
+                    if *pb_guard { if jb_guard.len() >= prebuffer_target_samples { *pb_guard = false; } else { data.fill(0.0); return; } }
                 }
 
-                let available = jb_guard.len();
-                let take = std::cmp::min(frames_needed, available);
-                for i in 0..take {
-                    data[data_idx + i] = jb_guard.pop_front().unwrap();
-                }
+                let take = std::cmp::min(frames_needed, jb_guard.len());
+                for i in 0..take { data[data_idx + i] = jb_guard.pop_front().unwrap(); }
                 data_idx += take;
                 frames_needed -= take;
 
                 if frames_needed > 0 {
-                    for i in 0..frames_needed {
-                        data[data_idx + i] = 0.0;
-                    }
-                    if let Ok(mut pb_guard) = pb_primary.try_lock() {
-                        *pb_guard = true;
-                    }
+                    for i in 0..frames_needed { data[data_idx + i] = 0.0; }
                 }
-            } else {
-                data.fill(0.0);
-            }
+            } else { data.fill(0.0); }
         },
         |err| error!(error = %err, "Hardware playback stream exception"),
         None,
@@ -521,7 +707,7 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
             let pb_fallback = Arc::clone(&is_prebuffering);
             let tel_fallback_cb = Arc::clone(&telemetry);
             
-            match device.build_output_stream(
+            device.build_output_stream(
                 &fallback_config,
                 move |data: &mut [f32], _: &_| {
                     let mut frames_needed = data.len();
@@ -529,14 +715,8 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
 
                     if let Ok(rx_guard) = rx_fallback.try_lock() {
                         while let Ok(decrypted_bytes) = rx_guard.try_recv() {
-                            let incoming = decrypted_bytes.chunks_exact(2)
-                                .map(|b| {
-                                    let sample = i16::from_le_bytes([b[0], b[1]]);
-                                    sample as f32 / i16::MAX as f32
-                                });
-                            if let Ok(mut jb_guard) = jb_fallback.try_lock() {
-                                jb_guard.extend(incoming);
-                            }
+                            let incoming = decrypted_bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32);
+                            if let Ok(mut jb_guard) = jb_fallback.try_lock() { jb_guard.extend(incoming); }
                         }
                     }
 
@@ -546,110 +726,69 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
                             jb_guard.drain(0..overflow);
                         }
 
-                        if let Ok(mut tel) = tel_fallback_cb.try_lock() {
-                            tel.jitter_buffer_len = jb_guard.len();
-                        }
+                        if let Ok(mut tel) = tel_fallback_cb.try_lock() { tel.jitter_buffer_len = jb_guard.len(); }
 
                         if let Ok(mut pb_guard) = pb_fallback.try_lock() {
-                            if *pb_guard {
-                                if jb_guard.len() >= prebuffer_target_samples {
-                                    *pb_guard = false;
-                                } else {
-                                    data.fill(0.0);
-                                    return;
-                                }
-                            }
+                            if *pb_guard { if jb_guard.len() >= prebuffer_target_samples { *pb_guard = false; } else { data.fill(0.0); return; } }
                         }
 
-                        let available = jb_guard.len();
-                        let take = std::cmp::min(frames_needed, available);
-                        for i in 0..take {
-                            data[data_idx + i] = jb_fallback.try_lock().unwrap().pop_front().unwrap();
-                        }
+                        let take = std::cmp::min(frames_needed, jb_guard.len());
+                        for i in 0..take { data[data_idx + i] = jb_fallback.try_lock().unwrap().pop_front().unwrap(); }
                         data_idx += take;
                         frames_needed -= take;
 
                         if frames_needed > 0 {
-                            for i in 0..frames_needed {
-                                data[data_idx + i] = 0.0;
-                            }
-                            if let Ok(mut pb_guard) = pb_fallback.try_lock() {
-                                *pb_guard = true;
-                            }
+                            for i in 0..frames_needed { data[data_idx + i] = 0.0; }
                         }
-                    } else {
-                        data.fill(0.0);
-                    }
+                    } else { data.fill(0.0); }
                 },
                 |err| error!(error = %err, "Hardware playback stream exception"),
                 None,
-            ) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!(error = %e, "Hardware allocation failure.");
-                    return;
-                }
-            }
+            ).unwrap()
         }
     };
 
-    if let Err(e) = audio_stream.play() {
-        error!(error = %e, "Failed to transition playback pipeline to active state");
-        return;
-    }
+    if let Err(e) = audio_stream.play() { error!(error = %e, "Failed to transition playback pipeline to active state"); return; }
 
-    let mut counter: u64 = 0;
-    let mut len_buf = [0u8; 4];
+    let mut internal_packet_count: u64 = 0;
+    let mut last_seen_counter: u64 = 0;
 
     loop {
-        if let Ok(guard) = telemetry.lock() {
-            if !guard.is_running {
-                info!("Client termination sequence triggered. Dropping active endpoints.");
-                break;
-            }
-        }
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { break; } }
+        match socket.recv(&mut buf) {
+            Ok(size) => {
+                if size < 8 { continue; }
+                
+                if size >= HANDSHAKE_ACK.len() && &buf[0..HANDSHAKE_ACK.len()] == HANDSHAKE_ACK {
+                    warn!("Intercepted redundant AUBRI_ACK handshake packet. Dropping to prevent pipeline desynchronization.");
+                    continue;
+                }
 
-        match stream.read_exact(&mut len_buf) {
-            Ok(_) => {}
+                let mut counter_buf = [0u8; 8];
+                counter_buf.copy_from_slice(&buf[0..8]);
+                let packet_counter = u64::from_le_bytes(counter_buf);
+
+                if packet_counter <= last_seen_counter && last_seen_counter > 0 { continue; }
+                last_seen_counter = packet_counter;
+
+                let ciphertext = &buf[8..size];
+                let nonce = generate_nonce(packet_counter);
+
+                match cipher.decrypt(&nonce, ciphertext) {
+                    Ok(plaintext) => {
+                        let _ = tx.try_send(plaintext);
+                        internal_packet_count += 1;
+                        if let Ok(mut tel) = telemetry.lock() {
+                            tel.packets_processed = internal_packet_count;
+                            tel.bytes_processed += size as u64;
+                        }
+                    }
+                    Err(_) => { error!("CRITICAL DATA ANOMALY: Frame decryption failure! Symmetric authentication tags mismatch."); }
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
             Err(_) => break,
         }
-        
-        let chunk_len = u32::from_le_bytes(len_buf) as usize;
-        
-        if chunk_len > MAX_SAFE_PAYLOAD_BYTES {
-            error!("CRITICAL: Network payload desynchronization detected. Refusing massive RAM allocation.");
-            break;
-        }
-
-        let mut ciphertext = vec![0u8; chunk_len];
-        
-        if stream.read_exact(&mut ciphertext).is_err() {
-            warn!("Connection abruptly dropped during frame processing stream chunk read.");
-            break;
-        }
-
-        let nonce = generate_nonce(counter);
-        match cipher.decrypt(&nonce, ciphertext.as_ref()) {
-            Ok(plaintext) => {
-                if tx.send(plaintext).is_err() {
-                    break;
-                }
-                counter += 1;
-                if let Ok(mut tel) = telemetry.lock() {
-                    tel.packets_processed = counter;
-                    tel.bytes_processed += 4 + chunk_len as u64;
-                }
-            }
-            Err(_) => {
-                error!("CRITICAL DATA ANOMALY: Frame decryption failure! Symmetric authentication tags mismatch.");
-                break;
-            }
-        }
     }
-
-    if let Ok(mut tel) = telemetry.lock() {
-        tel.is_running = false;
-        tel.status = "Session closed.".to_string();
-    }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
 }

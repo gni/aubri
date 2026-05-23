@@ -12,6 +12,7 @@ pub struct AppWindow {
     capture_device: String,
     playback_device: String,
     target_hz: String,
+    protocol: String,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     devices_scanned: bool,
@@ -28,22 +29,25 @@ impl AppWindow {
         let mut cap_dev = "System Default Input".to_string();
         let mut play_dev = "System Default Output".to_string();
         let mut target_hz = "Default OS Match".to_string();
+        let mut protocol = "UDP".to_string();
 
         if let Some(ref mode) = cli_mode {
             match mode {
-                Mode::Server { bind, secret, device, sample_rate, .. } => {
+                Mode::Server { bind, secret, device, sample_rate, protocol: cli_proto, .. } => {
                     is_server = true;
                     bind_addr = bind.clone();
                     if let Some(s) = secret { secret_key = s.clone(); }
                     if let Some(d) = device { cap_dev = d.clone(); }
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
+                    protocol = cli_proto.to_uppercase();
                 }
-                Mode::Client { address, secret, device, sample_rate, .. } => {
+                Mode::Client { address, secret, device, sample_rate, protocol: cli_proto, .. } => {
                     is_server = false;
                     bind_addr = address.clone();
                     if let Some(s) = secret { secret_key = s.clone(); }
                     if let Some(d) = device { play_dev = d.clone(); }
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
+                    protocol = cli_proto.to_uppercase();
                 }
                 _ => {}
             }
@@ -56,6 +60,7 @@ impl AppWindow {
             capture_device: cap_dev,
             playback_device: play_dev,
             target_hz,
+            protocol,
             available_inputs: vec!["System Default Input".to_string()],
             available_outputs: vec!["System Default Output".to_string()],
             devices_scanned: false,
@@ -82,8 +87,6 @@ impl eframe::App for AppWindow {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let tel = self.telemetry.lock().unwrap().clone();
 
-        // CPU Optimization: Only force the UI to wake up and repaint if the engine is actively running.
-        // If inactive, egui enters pure reactive mode (0% CPU).
         if tel.is_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -95,15 +98,15 @@ impl eframe::App for AppWindow {
                 std::thread::spawn(move || {
                     let target_host = cpal::default_host();
                     match mode {
-                        Mode::Server { bind, secret, device, sample_rate, .. } => {
+                        Mode::Server { bind, secret, device, sample_rate, protocol, .. } => {
                             let dev_target = if device.as_deref() == Some("System Default Input") { None } else { device };
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
-                            crate::core::run_server(target_host, &bind, &fallback_secret, dev_target, sample_rate, tel_clone);
+                            crate::core::run_server(target_host, &bind, &fallback_secret, dev_target, sample_rate, &protocol, tel_clone);
                         }
-                        Mode::Client { address, secret, device, sample_rate, .. } => {
+                        Mode::Client { address, secret, device, sample_rate, protocol, .. } => {
                             let dev_target = if device.as_deref() == Some("System Default Output") { None } else { device };
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
-                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, tel_clone);
+                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, &protocol, tel_clone);
                         }
                         _ => {}
                     }
@@ -146,6 +149,13 @@ impl eframe::App for AppWindow {
 
                                     ui.label(egui::RichText::new("Authentication Secret").color(Color32::from_rgb(180, 190, 200)));
                                     ui.add(egui::TextEdit::singleline(&mut self.secret_key).password(true).desired_width(f32::INFINITY));
+                                    ui.end_row();
+
+                                    ui.label(egui::RichText::new("Transport Protocol").color(Color32::from_rgb(180, 190, 200)));
+                                    ui.horizontal(|ui| {
+                                        ui.selectable_value(&mut self.protocol, "UDP".to_string(), "UDP (Low Latency)");
+                                        ui.selectable_value(&mut self.protocol, "TCP".to_string(), "TCP (High Reliability)");
+                                    });
                                     ui.end_row();
 
                                     ui.label(egui::RichText::new("Sample Rate").color(Color32::from_rgb(180, 190, 200)));
@@ -195,6 +205,7 @@ impl eframe::App for AppWindow {
                         let mode = self.is_server_mode;
                         let bind = self.bind_addr.clone();
                         let secret = self.secret_key.clone();
+                        let protocol = self.protocol.clone();
                         let hz_override = self.target_hz.parse::<u32>().ok();
                         
                         let dev = if mode {
@@ -208,9 +219,9 @@ impl eframe::App for AppWindow {
                         std::thread::spawn(move || {
                             let target_host = cpal::default_host();
                             if mode {
-                                crate::core::run_server(target_host, &bind, &secret, dev, hz_override, tel_clone);
+                                crate::core::run_server(target_host, &bind, &secret, dev, hz_override, &protocol, tel_clone);
                             } else {
-                                crate::core::run_client(target_host, &bind, &secret, dev, hz_override, tel_clone);
+                                crate::core::run_client(target_host, &bind, &secret, dev, hz_override, &protocol, tel_clone);
                             }
                         });
                     }
@@ -224,7 +235,7 @@ impl eframe::App for AppWindow {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("●").color(Color32::from_rgb(80, 200, 150)));
-                                ui.label(egui::RichText::new(format!("{} Engine Active", tel.mode)).strong());
+                                ui.label(egui::RichText::new(format!("{} Active", tel.mode)).strong());
                             });
                             ui.add_space(8.0);
                             ui.label(egui::RichText::new(&tel.status).color(Color32::from_rgb(160, 175, 170)));
@@ -251,7 +262,7 @@ impl eframe::App for AppWindow {
                             ui.end_row();
                         });
 
-                    if tel.mode == "Client" {
+                    if tel.mode.contains("Client") {
                         ui.add_space(24.0);
                         ui.label(egui::RichText::new("Jitter Buffer Latency Tolerance").strong());
                         ui.add_space(8.0);

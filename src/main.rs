@@ -19,31 +19,39 @@ pub enum Mode {
         #[arg(short, long, default_value = "0.0.0.0:8080")]
         bind: String,
         
-        /// Secret key for stream encryption. If omitted, checks AUBRI_SECRET env var. If missing, prompts securely.
         #[arg(short, long, env = "AUBRI_SECRET", hide_env_values = true)]
         secret: Option<String>,
         
         #[arg(short, long)]
         device: Option<String>,
+        
         #[arg(short = 'H', long)]
         headless: bool,
+        
         #[arg(short = 'r', long)]
         sample_rate: Option<u32>,
+        
+        #[arg(short = 'P', long, default_value = "udp")]
+        protocol: String,
     },
     Client {
         #[arg(short, long)]
         address: String,
         
-        /// Secret key for stream encryption. If omitted, checks AUBRI_SECRET env var. If missing, prompts securely.
         #[arg(short, long, env = "AUBRI_SECRET", hide_env_values = true)]
         secret: Option<String>,
         
         #[arg(short, long)]
         device: Option<String>,
+        
         #[arg(short = 'H', long)]
         headless: bool,
+        
         #[arg(short = 'r', long)]
         sample_rate: Option<u32>,
+        
+        #[arg(short = 'P', long, default_value = "udp")]
+        protocol: String,
     },
     ListDevices,
     Gui,
@@ -76,11 +84,11 @@ fn main() {
     let host = cpal::default_host();
 
     match cli.mode {
-        Some(Mode::Server { bind, secret, device, headless, sample_rate }) => {
+        Some(Mode::Server { bind, secret, device, headless, sample_rate, protocol }) => {
             let final_secret = resolve_secret(secret, headless);
             if headless {
                 let tel = std::sync::Arc::new(std::sync::Mutex::new(core::Telemetry::default()));
-                core::run_server(host, &bind, &final_secret, device, sample_rate, tel.clone());
+                core::run_server(host, &bind, &final_secret, device, sample_rate, &protocol, tel.clone());
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if let Ok(guard) = tel.lock() {
@@ -88,14 +96,14 @@ fn main() {
                     }
                 }
             } else {
-                gui::launch_gui(Some(Mode::Server { bind, secret: Some(final_secret), device, headless, sample_rate }));
+                gui::launch_gui(Some(Mode::Server { bind, secret: Some(final_secret), device, headless, sample_rate, protocol }));
             }
         }
-        Some(Mode::Client { address, secret, device, headless, sample_rate }) => {
+        Some(Mode::Client { address, secret, device, headless, sample_rate, protocol }) => {
             let final_secret = resolve_secret(secret, headless);
             if headless {
                 let tel = std::sync::Arc::new(std::sync::Mutex::new(core::Telemetry::default()));
-                core::run_client(host, &address, &final_secret, device, sample_rate, tel.clone());
+                core::run_client(host, &address, &final_secret, device, sample_rate, &protocol, tel.clone());
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if let Ok(guard) = tel.lock() {
@@ -103,7 +111,7 @@ fn main() {
                     }
                 }
             } else {
-                gui::launch_gui(Some(Mode::Client { address, secret: Some(final_secret), device, headless, sample_rate }));
+                gui::launch_gui(Some(Mode::Client { address, secret: Some(final_secret), device, headless, sample_rate, protocol }));
             }
         }
         Some(Mode::ListDevices) => {
