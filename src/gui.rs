@@ -34,14 +34,14 @@ impl AppWindow {
                 Mode::Server { bind, secret, device, sample_rate, .. } => {
                     is_server = true;
                     bind_addr = bind.clone();
-                    secret_key = secret.clone();
+                    if let Some(s) = secret { secret_key = s.clone(); }
                     if let Some(d) = device { cap_dev = d.clone(); }
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
                 }
                 Mode::Client { address, secret, device, sample_rate, .. } => {
                     is_server = false;
                     bind_addr = address.clone();
-                    secret_key = secret.clone();
+                    if let Some(s) = secret { secret_key = s.clone(); }
                     if let Some(d) = device { play_dev = d.clone(); }
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
                 }
@@ -80,7 +80,13 @@ impl AppWindow {
 
 impl eframe::App for AppWindow {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        let tel = self.telemetry.lock().unwrap().clone();
+
+        // CPU Optimization: Only force the UI to wake up and repaint if the engine is actively running.
+        // If inactive, egui enters pure reactive mode (0% CPU).
+        if tel.is_running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
 
         if !self.has_auto_started && self.initial_cli_mode.is_some() {
             self.has_auto_started = true;
@@ -91,19 +97,19 @@ impl eframe::App for AppWindow {
                     match mode {
                         Mode::Server { bind, secret, device, sample_rate, .. } => {
                             let dev_target = if device.as_deref() == Some("System Default Input") { None } else { device };
-                            crate::core::run_server(target_host, &bind, &secret, dev_target, sample_rate, tel_clone);
+                            let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
+                            crate::core::run_server(target_host, &bind, &fallback_secret, dev_target, sample_rate, tel_clone);
                         }
                         Mode::Client { address, secret, device, sample_rate, .. } => {
                             let dev_target = if device.as_deref() == Some("System Default Output") { None } else { device };
-                            crate::core::run_client(target_host, &address, &secret, dev_target, sample_rate, tel_clone);
+                            let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
+                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, tel_clone);
                         }
                         _ => {}
                     }
                 });
             }
         }
-
-        let tel = self.telemetry.lock().unwrap().clone();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {

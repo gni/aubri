@@ -12,8 +12,8 @@ use tracing::{error, info, warn};
 
 const KDF_CONTEXT: &str = "aubri_p2p_audio_v2";
 const MAX_QUEUE_DEPTH: usize = 16;
-const MAX_LATENCY_MS: usize = 120;
-const PREBUFFER_MS: usize = 40;
+const MAX_LATENCY_MS: usize = 100; 
+const PREBUFFER_MS: usize = 60;
 const HARDWARE_BUFFER_FRAMES: u32 = 512;
 const MAX_SAFE_PAYLOAD_BYTES: usize = 1_000_000;
 
@@ -36,24 +36,26 @@ pub fn list_devices(host: cpal::Host) {
     let default_in = host.default_input_device().and_then(|d| d.name().ok());
     let default_out = host.default_output_device().and_then(|d| d.name().ok());
 
-    println!("--- Input Devices (Capture) ---");
+    println!("Input interfaces (capture):");
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
                 let is_default = if Some(&name) == default_in.as_ref() { " [DEFAULT]" } else { "" };
-                println!("  - {}{}", name, is_default);
+                let is_monitor = if name.to_lowercase().contains("monitor") { " [VIRTUAL LOOPBACK]" } else { "" };
+                println!("  * {}{}{}", name, is_default, is_monitor);
             }
         }
     } else {
         error!("Hardware exception reading input devices");
     }
 
-    println!("\n--- Output Devices (Playback) ---");
+    println!("\nOutput interfaces (playback):");
     if let Ok(devices) = host.output_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
                 let is_default = if Some(&name) == default_out.as_ref() { " [DEFAULT]" } else { "" };
-                println!("  - {}{}", name, is_default);
+                let is_null_sink = if name.to_lowercase().contains("aubri") { " [VIRTUAL SINK]" } else { "" };
+                println!("  * {}{}{}", name, is_default, is_null_sink);
             }
         }
     } else {
@@ -86,11 +88,19 @@ fn resolve_input_device(host: &cpal::Host, requested_device: &Option<String>) ->
                 let cfg = d.default_input_config().map_err(|e| format!("Interface locked or format unsupported: {}", e))?;
                 return Ok((d, cfg));
             }
+            return Err(format!("Strict matching failed. No input device contains the identifier '{}'.", name));
         }
     }
 
     if let Some(d) = host.default_input_device() {
         if let Ok(cfg) = d.default_input_config() {
+            return Ok((d, cfg));
+        }
+    }
+
+    if let Ok(mut devs) = host.input_devices() {
+        if let Some(d) = devs.find(|d| d.default_input_config().is_ok()) {
+            let cfg = d.default_input_config().unwrap();
             return Ok((d, cfg));
         }
     }
@@ -110,11 +120,19 @@ fn resolve_output_device(host: &cpal::Host, requested_device: &Option<String>) -
                 let cfg = d.default_output_config().map_err(|e| format!("Interface locked or format unsupported: {}", e))?;
                 return Ok((d, cfg));
             }
+            return Err(format!("Strict matching failed. No output device contains the identifier '{}'.", name));
         }
     }
 
     if let Some(d) = host.default_output_device() {
         if let Ok(cfg) = d.default_output_config() {
+            return Ok((d, cfg));
+        }
+    }
+
+    if let Ok(mut devs) = host.output_devices() {
+        if let Some(d) = devs.find(|d| d.default_output_config().is_ok()) {
+            let cfg = d.default_output_config().unwrap();
             return Ok((d, cfg));
         }
     }
@@ -546,7 +564,7 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
                         let available = jb_guard.len();
                         let take = std::cmp::min(frames_needed, available);
                         for i in 0..take {
-                            data[data_idx + i] = jb_guard.pop_front().unwrap();
+                            data[data_idx + i] = jb_fallback.try_lock().unwrap().pop_front().unwrap();
                         }
                         data_idx += take;
                         frames_needed -= take;
@@ -599,7 +617,6 @@ pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Op
         
         let chunk_len = u32::from_le_bytes(len_buf) as usize;
         
-        // Anti-OOM payload boundary enforcement
         if chunk_len > MAX_SAFE_PAYLOAD_BYTES {
             error!("CRITICAL: Network payload desynchronization detected. Refusing massive RAM allocation.");
             break;
