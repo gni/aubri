@@ -18,6 +18,7 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
 const HANDSHAKE_REQ: &[u8] = b"AUBRI_REQ";
 const HANDSHAKE_ACK: &[u8] = b"AUBRI_ACK";
+const KEEPALIVE_PING: &[u8] = b"AUBRI_PNG";
 
 macro_rules! handle_reconnect {
     ($tel:expr, $keep_alive:expr, $msg:expr, $loop_label:tt) => {
@@ -48,35 +49,35 @@ pub struct Telemetry {
 }
 
 pub fn list_devices(host: cpal::Host) {
-    info!("Initializing audio device enumeration routine");
+    info!("initializing audio device enumeration routine");
     
     let default_in = host.default_input_device().and_then(|d| d.name().ok());
     let default_out = host.default_output_device().and_then(|d| d.name().ok());
 
-    println!("Input interfaces (capture):");
+    println!("input interfaces (capture):");
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
-                let is_default = if Some(&name) == default_in.as_ref() { " [DEFAULT]" } else { "" };
-                let is_monitor = if name.to_lowercase().contains("monitor") { " [VIRTUAL LOOPBACK]" } else { "" };
+                let is_default = if Some(&name) == default_in.as_ref() { " [default]" } else { "" };
+                let is_monitor = if name.to_lowercase().contains("monitor") { " [virtual loopback]" } else { "" };
                 println!("  * {}{}{}", name, is_default, is_monitor);
             }
         }
     } else {
-        error!("Hardware exception reading input devices");
+        error!("hardware exception reading input devices");
     }
 
-    println!("\nOutput interfaces (playback):");
+    println!("\noutput interfaces (playback):");
     if let Ok(devices) = host.output_devices() {
         for device in devices {
             if let Ok(name) = device.name() {
-                let is_default = if Some(&name) == default_out.as_ref() { " [DEFAULT]" } else { "" };
-                let is_null_sink = if name.to_lowercase().contains("aubri") { " [VIRTUAL SINK]" } else { "" };
+                let is_default = if Some(&name) == default_out.as_ref() { " [default]" } else { "" };
+                let is_null_sink = if name.to_lowercase().contains("aubri") { " [virtual sink]" } else { "" };
                 println!("  * {}{}{}", name, is_default, is_null_sink);
             }
         }
     } else {
-        error!("Hardware exception reading output devices");
+        error!("hardware exception reading output devices");
     }
 }
 
@@ -96,16 +97,16 @@ fn derive_session_key(secret: &str, salt: &[u8; 32]) -> [u8; 32] {
 fn resolve_input_device(host: &cpal::Host, requested_device: &Option<String>) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
     if let Some(name) = requested_device {
         if !name.trim().is_empty() && name != "System Default Input" {
-            let mut devs = host.input_devices().map_err(|e| format!("Cannot query topology: {}", e))?;
+            let mut devs = host.input_devices().map_err(|e| format!("cannot query topology: {}", e))?;
             let target = name.to_lowercase();
             if let Some(d) = devs.find(|d| {
                 let d_name = d.name().unwrap_or_default().to_lowercase();
                 d_name == target || d_name.contains(&target)
             }) {
-                let cfg = d.default_input_config().map_err(|e| format!("Interface locked or format unsupported: {}", e))?;
+                let cfg = d.default_input_config().map_err(|e| format!("interface locked or format unsupported: {}", e))?;
                 return Ok((d, cfg));
             }
-            return Err(format!("Strict matching failed. No input device contains the identifier '{}'.", name));
+            return Err(format!("strict matching failed. no input device contains the identifier '{}'.", name));
         }
     }
 
@@ -122,22 +123,22 @@ fn resolve_input_device(host: &cpal::Host, requested_device: &Option<String>) ->
         }
     }
 
-    Err("No available unlocked input devices found. Verify execution state.".to_string())
+    Err("no available unlocked input devices found. verify execution state.".to_string())
 }
 
 fn resolve_output_device(host: &cpal::Host, requested_device: &Option<String>) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
     if let Some(name) = requested_device {
         if !name.trim().is_empty() && name != "System Default Output" {
-            let mut devs = host.output_devices().map_err(|e| format!("Cannot query topology: {}", e))?;
+            let mut devs = host.output_devices().map_err(|e| format!("cannot query topology: {}", e))?;
             let target = name.to_lowercase();
             if let Some(d) = devs.find(|d| {
                 let d_name = d.name().unwrap_or_default().to_lowercase();
                 d_name == target || d_name.contains(&target)
             }) {
-                let cfg = d.default_output_config().map_err(|e| format!("Interface locked or format unsupported: {}", e))?;
+                let cfg = d.default_output_config().map_err(|e| format!("interface locked or format unsupported: {}", e))?;
                 return Ok((d, cfg));
             }
-            return Err(format!("Strict matching failed. No output device contains the identifier '{}'.", name));
+            return Err(format!("strict matching failed. no output device contains the identifier '{}'.", name));
         }
     }
 
@@ -154,7 +155,7 @@ fn resolve_output_device(host: &cpal::Host, requested_device: &Option<String>) -
         }
     }
 
-    Err("No available unlocked output devices found. Verify execution state.".to_string())
+    Err("no available unlocked output devices found. verify execution state.".to_string())
 }
 
 pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, protocol: &str, telemetry: Arc<Mutex<Telemetry>>) {
@@ -177,8 +178,8 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     let (device, supported_config) = match resolve_input_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Input failure: {}", e); tel.is_running = false; }
-            error!(error = %e, "Input device resolution failed");
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("input failure: {}", e); tel.is_running = false; }
+            error!(error = %e, "input device resolution failed");
             return;
         }
     };
@@ -192,10 +193,10 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
 
     if let Ok(mut tel) = telemetry.lock() {
         tel.is_running = true;
-        tel.mode = "Server (TCP)".to_string();
+        tel.mode = "server (tcp)".to_string();
         tel.sample_rate = sample_rate;
         tel.channels = channels;
-        tel.status = "Binding address interfaces...".to_string();
+        tel.status = "binding address interfaces...".to_string();
         tel.packets_processed = 0;
         tel.bytes_processed = 0;
     }
@@ -203,13 +204,13 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     let listener = match TcpListener::bind(bind) {
         Ok(l) => l,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Network bind failure: {}", e); tel.is_running = false; }
-            error!(error = %e, bind = %bind, "Network binding failed");
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("network bind failure: {}", e); tel.is_running = false; }
+            error!(error = %e, bind = %bind, "network binding failed");
             return;
         }
     };
     
-    info!(bind = %bind, "Listening securely for incoming client connections (TCP)");
+    info!(bind = %bind, "listening securely for incoming tcp connections");
     let _ = listener.set_nonblocking(true);
 
     let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(MAX_QUEUE_DEPTH);
@@ -221,7 +222,7 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
             let pcm_16: Vec<i16> = data.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
             let _ = tx_primary.try_send(pcm_16);
         },
-        |err| error!(error = %err, "Hardware capture exception"),
+        |err| error!(error = %err, "hardware capture exception"),
         None,
     ).unwrap();
 
@@ -232,7 +233,7 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
         
         while rx.try_recv().is_ok() {}
 
-        if let Ok(mut tel) = telemetry.lock() { tel.status = "Awaiting inbound connection...".to_string(); }
+        if let Ok(mut tel) = telemetry.lock() { tel.status = "awaiting inbound connection...".to_string(); }
 
         let (mut stream, addr) = loop {
             if let Ok(guard) = telemetry.lock() { if !guard.is_running { return; } }
@@ -240,13 +241,13 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
                 Ok((s, a)) => { let _ = s.set_nonblocking(false); break (s, a); }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(100)),
                 Err(e) => {
-                    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Socket error: {}", e); tel.is_running = false; }
+                    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("socket error: {}", e); tel.is_running = false; }
                     return;
                 }
             }
         };
 
-        if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Connected to remote client: {}", addr); }
+        if let Ok(mut tel) = telemetry.lock() { tel.status = format!("connected to remote client: {}", addr); }
         let _ = stream.set_nodelay(true);
 
         let mut salt = [0u8; 32];
@@ -281,14 +282,14 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
             }
         }
     }
-    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "session closed.".to_string(); }
 }
 
 fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, latency: Option<usize>, prebuffer: Option<usize>, keep_alive: bool, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, _) = match resolve_output_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Output interface failure: {}", e); tel.is_running = false; }
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("output interface failure: {}", e); tel.is_running = false; }
             return;
         }
     };
@@ -296,15 +297,15 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
     'connection_loop: loop {
         if let Ok(mut tel) = telemetry.lock() {
             tel.is_running = true;
-            tel.mode = "Client (TCP)".to_string();
-            tel.status = format!("Routing outbound socket connection to {}...", address);
+            tel.mode = "client (tcp)".to_string();
+            tel.status = format!("routing outbound socket connection to {}...", address);
             tel.packets_processed = 0;
             tel.bytes_processed = 0;
         }
         
         let mut stream = match TcpStream::connect(address) {
             Ok(s) => s,
-            Err(e) => { handle_reconnect!(telemetry, keep_alive, format!("Connection failed: {}. Retrying in 3s...", e), 'connection_loop); }
+            Err(e) => { handle_reconnect!(telemetry, keep_alive, format!("connection failed: {}. retrying in 3s...", e), 'connection_loop); }
         };
 
         let _ = stream.set_nodelay(true);
@@ -315,12 +316,12 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         loop {
             if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'connection_loop; } }
             if handshake_start.elapsed().as_secs() > HANDSHAKE_TIMEOUT_SECS {
-                handle_reconnect!(telemetry, keep_alive, "Handshake timed out. Retrying in 3s...", 'connection_loop);
+                handle_reconnect!(telemetry, keep_alive, "handshake timed out. retrying in 3s...", 'connection_loop);
             }
             match stream.read_exact(&mut salt) {
                 Ok(_) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
-                Err(_) => handle_reconnect!(telemetry, keep_alive, "Socket error during handshake. Retrying in 3s...", 'connection_loop),
+                Err(_) => handle_reconnect!(telemetry, keep_alive, "socket error during handshake. retrying in 3s...", 'connection_loop),
             }
         }
 
@@ -333,16 +334,16 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         loop {
             if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'connection_loop; } }
             if handshake_start.elapsed().as_secs() > HANDSHAKE_TIMEOUT_SECS {
-                handle_reconnect!(telemetry, keep_alive, "Sample rate negotiation timed out. Retrying in 3s...", 'connection_loop);
+                handle_reconnect!(telemetry, keep_alive, "sample rate negotiation timed out. retrying in 3s...", 'connection_loop);
             }
             match stream.read_exact(&mut sr_buf) {
                 Ok(_) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
-                Err(_) => handle_reconnect!(telemetry, keep_alive, "Socket error during rate negotiation. Retrying in 3s...", 'connection_loop),
+                Err(_) => handle_reconnect!(telemetry, keep_alive, "socket error during rate negotiation. retrying in 3s...", 'connection_loop),
             }
         }
         if stream.read_exact(&mut ch_buf).is_err() { 
-            handle_reconnect!(telemetry, keep_alive, "Failed to read channel configuration. Retrying in 3s...", 'connection_loop); 
+            handle_reconnect!(telemetry, keep_alive, "failed to read channel configuration. retrying in 3s...", 'connection_loop); 
         }
 
         let negotiated_rate = u32::from_le_bytes(sr_buf);
@@ -367,7 +368,7 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
             tel.sample_rate = final_sample_rate;
             tel.channels = channels;
             tel.max_buffer_capacity = max_jitter_buffer_samples;
-            tel.status = "Synchronized cryptographic handshake. Audio streaming active.".to_string();
+            tel.status = "streaming active.".to_string();
         }
 
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
@@ -418,15 +419,15 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                     for i in 0..take { data[i] = jb_guard.pop_front().unwrap(); }
                 } else { data.fill(0.0); }
             },
-            |err| error!(error = %err, "Playback stream exception"),
+            |err| error!(error = %err, "playback stream exception"),
             None,
         ) {
             Ok(stream) => stream,
-            Err(e) => { handle_reconnect!(telemetry, keep_alive, format!("Audio build exception: {}", e), 'connection_loop); }
+            Err(e) => { handle_reconnect!(telemetry, keep_alive, format!("audio build exception: {}", e), 'connection_loop); }
         };
 
         if audio_stream.play().is_err() { 
-            handle_reconnect!(telemetry, keep_alive, "Hardware playback exception. Retrying in 3s...", 'connection_loop); 
+            handle_reconnect!(telemetry, keep_alive, "hardware playback exception. retrying in 3s...", 'connection_loop); 
         }
 
         let mut counter: u64 = 0;
@@ -439,7 +440,7 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                 Ok(_) => { watchdog = std::time::Instant::now(); }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                     if watchdog.elapsed().as_millis() > CLIENT_WATCHDOG_TIMEOUT_MS {
-                        warn!("TCP pipeline execution timeout. Server is unresponsive. Halting client.");
+                        warn!("tcp pipeline execution timeout. server is unresponsive. halting client.");
                         break; 
                     }
                     continue;
@@ -468,18 +469,18 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         }
         
         if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'connection_loop; } }
-        handle_reconnect!(telemetry, keep_alive, "Connection lost. Reconnecting in 3 seconds...", 'connection_loop);
+        handle_reconnect!(telemetry, keep_alive, "connection lost. reconnecting in 3 seconds...", 'connection_loop);
     }
     
-    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "session closed.".to_string(); }
 }
 
 fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, supported_config) = match resolve_input_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Input failure: {}", e); tel.is_running = false; }
-            error!(error = %e, "Input device resolution failed");
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("input failure: {}", e); tel.is_running = false; }
+            error!(error = %e, "input device resolution failed");
             return;
         }
     };
@@ -496,10 +497,10 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
 
     if let Ok(mut tel) = telemetry.lock() {
         tel.is_running = true;
-        tel.mode = "Server (UDP)".to_string();
+        tel.mode = "server (udp)".to_string();
         tel.sample_rate = sample_rate;
         tel.channels = channels;
-        tel.status = "Binding address interfaces...".to_string();
+        tel.status = "binding address interfaces...".to_string();
         tel.packets_processed = 0;
         tel.bytes_processed = 0;
     }
@@ -507,47 +508,13 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     let socket = match UdpSocket::bind(bind) {
         Ok(s) => s,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Network bind failure: {}", e); tel.is_running = false; }
-            error!(error = %e, bind = %bind, "Network binding failed on target interface");
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("network bind failure: {}", e); tel.is_running = false; }
+            error!(error = %e, bind = %bind, "network binding failed on target interface");
             return;
         }
     };
     
-    if let Ok(mut tel) = telemetry.lock() { tel.status = "Awaiting inbound UDP handshake...".to_string(); }
-    info!(bind = %bind, "Listening securely for incoming UDP connection requests");
-
-    if let Err(e) = socket.set_read_timeout(Some(std::time::Duration::from_millis(250))) { warn!(error = %e, "Failed to apply non-blocking timeouts to socket"); }
-
-    let mut buf = [0u8; 1024];
-    
-    let mut client_addr = loop {
-        if let Ok(guard) = telemetry.lock() { if !guard.is_running { info!("Server configuration loop halted by user."); return; } }
-        match socket.recv_from(&mut buf) {
-            Ok((size, addr)) => {
-                if size == HANDSHAKE_REQ.len() && &buf[0..size] == HANDSHAKE_REQ {
-                    break addr;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
-            Err(e) => { error!(error = %e, "Socket read exception during handshake"); }
-        }
-    };
-
-    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Connected to remote client: {}", client_addr); }
-    info!(client_addr = %client_addr, "Handshake request verified. Deriving ephemeral session key.");
-
-    let mut salt = [0u8; 32];
-    rand::rng().fill_bytes(&mut salt);
-    let mut session_key = derive_session_key(secret, &salt);
-    let mut cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
-
-    let mut ack_packet = Vec::with_capacity(HANDSHAKE_ACK.len() + 32 + 4 + 2);
-    ack_packet.extend_from_slice(HANDSHAKE_ACK);
-    ack_packet.extend_from_slice(&salt);
-    ack_packet.extend_from_slice(&sample_rate.to_le_bytes());
-    ack_packet.extend_from_slice(&channels.to_le_bytes());
-
-    for _ in 0..5 { let _ = socket.send_to(&ack_packet, client_addr); std::thread::sleep(std::time::Duration::from_millis(10)); }
+    if let Err(e) = socket.set_nonblocking(true) { warn!(error = %e, "failed to inject non-blocking socket state"); }
 
     let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(MAX_QUEUE_DEPTH);
     let tx_primary = tx.clone();
@@ -558,7 +525,7 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
             let pcm_16: Vec<i16> = data.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
             let _ = tx_primary.try_send(pcm_16);
         },
-        |err| error!(error = %err, "Hardware capture stream exception"),
+        |err| error!(error = %err, "hardware capture stream exception"),
         None,
     ) {
         Ok(stream) => stream,
@@ -570,12 +537,12 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
                     let pcm_16: Vec<i16> = data.iter().map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).collect();
                     let _ = tx.try_send(pcm_16);
                 },
-                |err| error!(error = %err, "Hardware capture stream exception"),
+                |err| error!(error = %err, "hardware capture stream exception"),
                 None,
             ) {
                 Ok(stream) => stream,
                 Err(e) => {
-                    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Audio hardware interface build crashed: {}", e); tel.is_running = false; }
+                    if let Ok(mut tel) = telemetry.lock() { tel.status = format!("audio hardware interface build crashed: {}", e); tel.is_running = false; }
                     return;
                 }
             }
@@ -584,48 +551,94 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
 
     if audio_stream.play().is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
 
-    let mut counter: u64 = 0;
-    if let Err(e) = socket.set_nonblocking(true) { warn!(error = %e, "Failed to inject non-blocking socket state for multiplexed operations"); }
+    let mut buf = [0u8; 1024];
 
-    loop {
-        if let Ok(guard) = telemetry.lock() { if !guard.is_running { break; } }
+    'server_loop: loop {
+        if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'server_loop; } }
         
-        while let Ok((size, new_addr)) = socket.recv_from(&mut buf) {
-            if size == HANDSHAKE_REQ.len() && &buf[0..size] == HANDSHAKE_REQ {
-                info!(client_addr = %new_addr, "Intercepted new UDP handshake request. Re-establishing secure session context.");
-                client_addr = new_addr;
-                
-                rand::rng().fill_bytes(&mut salt);
-                session_key = derive_session_key(secret, &salt);
-                cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
-                
-                let mut ack_packet = Vec::with_capacity(HANDSHAKE_ACK.len() + 32 + 4 + 2);
-                ack_packet.extend_from_slice(HANDSHAKE_ACK);
-                ack_packet.extend_from_slice(&salt);
-                ack_packet.extend_from_slice(&sample_rate.to_le_bytes());
-                ack_packet.extend_from_slice(&channels.to_le_bytes());
+        if let Ok(mut tel) = telemetry.lock() { tel.status = "awaiting inbound udp handshake...".to_string(); }
+        
+        let mut client_addr = loop {
+            if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'server_loop; } }
+            
+            while let Ok(_) = rx.try_recv() {}
 
-                for _ in 0..5 { 
-                    let _ = socket.send_to(&ack_packet, client_addr); 
-                    std::thread::sleep(std::time::Duration::from_millis(10)); 
+            match socket.recv_from(&mut buf) {
+                Ok((size, addr)) => {
+                    if size == HANDSHAKE_REQ.len() && &buf[0..size] == HANDSHAKE_REQ {
+                        break addr;
+                    }
                 }
-                counter = 0;
-                
-                if let Ok(mut tel) = telemetry.lock() { 
-                    tel.status = format!("Connected to remote client: {}", client_addr); 
-                    tel.packets_processed = 0;
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
+        };
+
+        if let Ok(mut tel) = telemetry.lock() { 
+            tel.status = format!("connected to remote client: {}", client_addr); 
+            tel.packets_processed = 0;
+            tel.bytes_processed = 0;
         }
 
-        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(raw_i16) => {
-                let raw_bytes: &[u8] = bytemuck::cast_slice(&raw_i16);
-                counter += 1;
-                let nonce = generate_nonce(counter);
-                
-                match cipher.encrypt(&nonce, raw_bytes) {
-                    Ok(ciphertext) => {
+        let mut salt = [0u8; 32];
+        rand::rng().fill_bytes(&mut salt);
+        let mut session_key = derive_session_key(secret, &salt);
+        let mut cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
+
+        let mut ack_packet = Vec::with_capacity(HANDSHAKE_ACK.len() + 32 + 4 + 2);
+        ack_packet.extend_from_slice(HANDSHAKE_ACK);
+        ack_packet.extend_from_slice(&salt);
+        ack_packet.extend_from_slice(&sample_rate.to_le_bytes());
+        ack_packet.extend_from_slice(&channels.to_le_bytes());
+
+        for _ in 0..5 { let _ = socket.send_to(&ack_packet, client_addr); std::thread::sleep(std::time::Duration::from_millis(10)); }
+
+        let mut counter: u64 = 0;
+        let mut last_seen = std::time::Instant::now();
+        let mut last_handshake = std::time::Instant::now();
+
+        loop {
+            if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'server_loop; } }
+            
+            while let Ok((size, new_addr)) = socket.recv_from(&mut buf) {
+                if size == HANDSHAKE_REQ.len() && &buf[0..size] == HANDSHAKE_REQ {
+                    if last_handshake.elapsed().as_secs() > 2 {
+                        client_addr = new_addr;
+                        last_seen = std::time::Instant::now();
+                        last_handshake = std::time::Instant::now();
+                        
+                        rand::rng().fill_bytes(&mut salt);
+                        session_key = derive_session_key(secret, &salt);
+                        cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
+                        
+                        ack_packet.clear();
+                        ack_packet.extend_from_slice(HANDSHAKE_ACK);
+                        ack_packet.extend_from_slice(&salt);
+                        ack_packet.extend_from_slice(&sample_rate.to_le_bytes());
+                        ack_packet.extend_from_slice(&channels.to_le_bytes());
+
+                        for _ in 0..5 { let _ = socket.send_to(&ack_packet, client_addr); std::thread::sleep(std::time::Duration::from_millis(10)); }
+                        counter = 0;
+                        
+                        if let Ok(mut tel) = telemetry.lock() { tel.status = format!("connected to remote client: {}", client_addr); tel.packets_processed = 0; }
+                    }
+                } else if size == KEEPALIVE_PING.len() && &buf[0..size] == KEEPALIVE_PING {
+                    last_seen = std::time::Instant::now();
+                }
+            }
+
+            if last_seen.elapsed().as_millis() > CLIENT_WATCHDOG_TIMEOUT_MS {
+                warn!("client watchdog timeout. dropping session and waiting for new connections.");
+                break;
+            }
+
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(raw_i16) => {
+                    let raw_bytes: &[u8] = bytemuck::cast_slice(&raw_i16);
+                    counter += 1;
+                    let nonce = generate_nonce(counter);
+                    
+                    if let Ok(ciphertext) = cipher.encrypt(&nonce, raw_bytes) {
                         let mut packet = Vec::with_capacity(8 + ciphertext.len());
                         packet.extend_from_slice(&counter.to_le_bytes());
                         packet.extend_from_slice(&ciphertext);
@@ -633,22 +646,21 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
                         
                         if let Ok(mut tel) = telemetry.lock() { tel.packets_processed = counter; tel.bytes_processed += packet.len() as u64; }
                     }
-                    Err(_) => {}
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break 'server_loop,
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     
-    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session terminated contextually.".to_string(); }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "session terminated contextually.".to_string(); }
 }
 
 fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, latency: Option<usize>, prebuffer: Option<usize>, keep_alive: bool, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, _) = match resolve_output_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
-            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Output interface failure: {}", e); tel.is_running = false; }
+            if let Ok(mut tel) = telemetry.lock() { tel.status = format!("output interface failure: {}", e); tel.is_running = false; }
             return;
         }
     };
@@ -656,8 +668,8 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
     'connection_loop: loop {
         if let Ok(mut tel) = telemetry.lock() {
             tel.is_running = true;
-            tel.mode = "Client (UDP)".to_string();
-            tel.status = format!("Routing outbound socket connection to {}...", address);
+            tel.mode = "client (udp)".to_string();
+            tel.status = format!("routing outbound socket connection to {}...", address);
             tel.packets_processed = 0;
             tel.bytes_processed = 0;
         }
@@ -665,16 +677,16 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         let socket = match UdpSocket::bind("0.0.0.0:0") {
             Ok(s) => s,
             Err(e) => {
-                if let Ok(mut tel) = telemetry.lock() { tel.status = format!("Local socket bind failed: {}", e); tel.is_running = false; }
+                if let Ok(mut tel) = telemetry.lock() { tel.status = format!("local socket bind failed: {}", e); tel.is_running = false; }
                 return;
             }
         };
 
         if let Err(e) = socket.connect(address) {
-            handle_reconnect!(telemetry, keep_alive, format!("Failed to route UDP to target address: {}", e), 'connection_loop);
+            handle_reconnect!(telemetry, keep_alive, format!("failed to route udp to target address: {}", e), 'connection_loop);
         }
 
-        if let Err(e) = socket.set_read_timeout(Some(std::time::Duration::from_millis(500))) { warn!(error = %e, "Failed to inject read timeouts into socket."); }
+        if let Err(e) = socket.set_read_timeout(Some(std::time::Duration::from_millis(500))) { warn!(error = %e, "failed to inject read timeouts into socket."); }
 
         let mut buf = [0u8; MAX_SAFE_PAYLOAD_BYTES];
         let expected_ack_size = HANDSHAKE_ACK.len() + 32 + 4 + 2;
@@ -685,7 +697,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
             let _ = socket.send(HANDSHAKE_REQ);
 
             if handshake_start.elapsed().as_secs() > HANDSHAKE_TIMEOUT_SECS {
-                handle_reconnect!(telemetry, keep_alive, "UDP Handshake timed out. Remote server unreachable.", 'connection_loop);
+                handle_reconnect!(telemetry, keep_alive, "udp handshake timed out. remote server unreachable.", 'connection_loop);
             }
 
             match socket.recv(&mut buf) {
@@ -709,8 +721,8 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                         break (s, nr, ch);
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
-                Err(_) => handle_reconnect!(telemetry, keep_alive, "Socket failure during UDP handshake. Retrying in 3s...", 'connection_loop),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                Err(_) => handle_reconnect!(telemetry, keep_alive, "socket failure during udp handshake. retrying in 3s...", 'connection_loop),
             }
         };
 
@@ -732,7 +744,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
             tel.sample_rate = final_sample_rate;
             tel.channels = channels;
             tel.max_buffer_capacity = max_jitter_buffer_samples;
-            tel.status = "Synchronized UDP cryptographic handshake. Audio streaming active.".to_string();
+            tel.status = "streaming active.".to_string();
         }
 
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
@@ -784,7 +796,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                     for i in 0..take { data[i] = jb_guard.pop_front().unwrap(); }
                 } else { data.fill(0.0); }
             },
-            |err| error!(error = %err, "Hardware playback stream exception"),
+            |err| error!(error = %err, "hardware playback stream exception"),
             None,
         ) {
             Ok(stream) => stream,
@@ -835,29 +847,36 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                             for i in 0..take { data[i] = jb_guard.pop_front().unwrap(); }
                         } else { data.fill(0.0); }
                     },
-                    |err| error!(error = %err, "Hardware playback stream exception"),
+                    |err| error!(error = %err, "hardware playback stream exception"),
                     None,
                 ).unwrap()
             }
         };
 
         if audio_stream.play().is_err() { 
-            handle_reconnect!(telemetry, keep_alive, "Hardware playback exception. Retrying in 3s...", 'connection_loop); 
+            handle_reconnect!(telemetry, keep_alive, "hardware playback exception. retrying in 3s...", 'connection_loop); 
         }
 
         let mut internal_packet_count: u64 = 0;
         let mut last_seen_counter: u64 = 0;
         let mut watchdog = std::time::Instant::now();
+        let mut last_ping = std::time::Instant::now();
 
         loop {
             if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'connection_loop; } }
+            
+            if last_ping.elapsed().as_millis() > 500 {
+                let _ = socket.send(KEEPALIVE_PING);
+                last_ping = std::time::Instant::now();
+            }
+
             match socket.recv(&mut buf) {
                 Ok(size) => {
                     watchdog = std::time::Instant::now();
                     if size < 8 { continue; }
                     
                     if size >= HANDSHAKE_ACK.len() && &buf[0..HANDSHAKE_ACK.len()] == HANDSHAKE_ACK {
-                        warn!("Intercepted redundant AUBRI_ACK handshake packet. Dropping to prevent pipeline desynchronization.");
+                        warn!("intercepted redundant handshake packet. dropping to prevent pipeline desynchronization.");
                         continue;
                     }
 
@@ -880,23 +899,26 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                                 tel.bytes_processed += size as u64;
                             }
                         }
-                        Err(_) => { error!("CRITICAL DATA ANOMALY: Frame decryption failure! Symmetric authentication tags mismatch."); }
+                        Err(_) => { error!("critical data anomaly: frame decryption failure! symmetric authentication tags mismatch."); }
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::ConnectionReset => {
                     if watchdog.elapsed().as_millis() > CLIENT_WATCHDOG_TIMEOUT_MS {
-                        warn!("UDP pipeline execution timeout. Server is unresponsive. Halting client.");
+                        warn!("udp pipeline execution timeout. server is unresponsive. halting client.");
                         break;
                     }
                     continue;
                 }
-                Err(_) => break,
+                Err(e) => {
+                    error!("fatal socket read error: {}", e);
+                    break;
+                }
             }
         }
         
         if let Ok(guard) = telemetry.lock() { if !guard.is_running { break 'connection_loop; } }
-        handle_reconnect!(telemetry, keep_alive, "Connection lost. Reconnecting in 3 seconds...", 'connection_loop);
+        handle_reconnect!(telemetry, keep_alive, "connection lost. reconnecting in 3 seconds...", 'connection_loop);
     }
     
-    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
+    if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "session closed.".to_string(); }
 }
