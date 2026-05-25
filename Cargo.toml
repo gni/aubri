@@ -1,7 +1,16 @@
 [package]
 name = "aubri"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
+authors = ["Lucian BLETAN <neuraluc@gmail.com>"]
+description = "Encrypted P2P audio bridge for Linux"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/aubri"
+homepage = "https://github.com/gni/aubri"
+repository = "https://github.com/gni/aubri"
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["audio", "bridge", "udp", "p2p", "tcp"]
 
 [features]
 default = []
