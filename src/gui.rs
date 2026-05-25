@@ -295,6 +295,8 @@ impl eframe::App for AppWindow {
             });
         });
     }
+
+    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 }
 
 pub fn launch_gui(initial_mode: Option<Mode>) {
@@ -314,10 +316,10 @@ pub fn launch_gui(initial_mode: Option<Mode>) {
             visuals.panel_fill = Color32::from_rgb(18, 18, 20);
             visuals.window_fill = Color32::from_rgb(24, 24, 26);
             visuals.selection.bg_fill = Color32::from_rgb(60, 120, 105);
-            visuals.widgets.inactive.rounding = 6.0.into();
-            visuals.widgets.hovered.rounding = 6.0.into();
-            visuals.widgets.active.rounding = 6.0.into();
-            visuals.widgets.noninteractive.rounding = 6.0.into();
+            visuals.widgets.inactive.corner_radius = 6.0.into();
+            visuals.widgets.hovered.corner_radius = 6.0.into();
+            visuals.widgets.active.corner_radius = 6.0.into();
+            visuals.widgets.noninteractive.corner_radius = 6.0.into();
             visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(32, 34, 36);
 
             let mut style = egui::Style::default();
@@ -326,7 +328,7 @@ pub fn launch_gui(initial_mode: Option<Mode>) {
             style.spacing.button_padding = vec2(12.0, 8.0);
             cc.egui_ctx.set_style(style);
 
-            Box::new(AppWindow::new(initial_mode))
+            Ok(Box::new(AppWindow::new(initial_mode)))
         }),
     );
 }

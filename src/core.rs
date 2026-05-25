@@ -1,8 +1,7 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::Rng;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -11,11 +10,11 @@ use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn};
 
 const KDF_CONTEXT: &str = "aubri_p2p_audio_v2";
-const MAX_QUEUE_DEPTH: usize = 16;
-const MAX_LATENCY_MS: usize = 60;
-const PREBUFFER_MS: usize = 20;
+const MAX_QUEUE_DEPTH: usize = 128;
+const MAX_LATENCY_MS: usize = 350;
+const PREBUFFER_MS: usize = 120;
 const HARDWARE_BUFFER_FRAMES: u32 = 256;
-const MAX_SAFE_PAYLOAD_BYTES: usize = 2048;
+const MAX_SAFE_PAYLOAD_BYTES: usize = 16384;
 
 const HANDSHAKE_REQ: &[u8] = b"AUBRI_REQ";
 const HANDSHAKE_ACK: &[u8] = b"AUBRI_ACK";
@@ -171,9 +170,9 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
 
     let mut config: cpal::StreamConfig = supported_config.into();
     config.buffer_size = cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES);
-    if let Some(hz) = sample_rate_override { config.sample_rate = cpal::SampleRate(hz); }
+    if let Some(hz) = sample_rate_override { config.sample_rate = hz; }
 
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     let channels = config.channels;
 
     if let Ok(mut tel) = telemetry.lock() {
@@ -216,7 +215,7 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     let _ = stream.set_nodelay(true);
 
     let mut salt = [0u8; 32];
-    OsRng.fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     if stream.write_all(&salt).is_err() { if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; } return; }
 
     let session_key = derive_session_key(secret, &salt);
@@ -327,7 +326,7 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
 
     let config = cpal::StreamConfig {
         channels,
-        sample_rate: cpal::SampleRate(final_sample_rate),
+        sample_rate: final_sample_rate,
         buffer_size: cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES),
     };
 
@@ -356,7 +355,7 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
     let audio_stream = device.build_output_stream(
         &config,
         move |data: &mut [f32], _: &_| {
-            let mut frames_needed = data.len();
+            let frames_needed = data.len();
             let mut data_idx = 0;
 
             if let Ok(rx_guard) = rx_primary.try_lock() {
@@ -375,18 +374,21 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
 
                 if let Ok(mut pb_guard) = pb_primary.try_lock() {
                     if *pb_guard {
-                        if jb_guard.len() >= prebuffer_target_samples { *pb_guard = false; } else { data.fill(0.0); return; }
+                        if jb_guard.len() >= prebuffer_target_samples {
+                            *pb_guard = false;
+                        } else {
+                            data.fill(0.0);
+                            return;
+                        }
+                    } else if jb_guard.len() < frames_needed {
+                        *pb_guard = true;
+                        data.fill(0.0);
+                        return;
                     }
                 }
 
-                let take = std::cmp::min(frames_needed, jb_guard.len());
+                let take = frames_needed;
                 for i in 0..take { data[data_idx + i] = jb_guard.pop_front().unwrap(); }
-                data_idx += take;
-                frames_needed -= take;
-
-                if frames_needed > 0 {
-                    for i in 0..frames_needed { data[data_idx + i] = 0.0; }
-                }
             } else { data.fill(0.0); }
         },
         |err| error!(error = %err, "Playback stream exception"),
@@ -442,10 +444,10 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     config.buffer_size = cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES);
 
     if let Some(hz) = sample_rate_override {
-        config.sample_rate = cpal::SampleRate(hz);
+        config.sample_rate = hz;
     }
 
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     let channels = config.channels;
 
     if let Ok(mut tel) = telemetry.lock() {
@@ -491,7 +493,7 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     info!(client_addr = %client_addr, "Handshake request verified. Deriving ephemeral session key.");
 
     let mut salt = [0u8; 32];
-    OsRng.fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     let session_key = derive_session_key(secret, &salt);
     let cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
 
@@ -637,7 +639,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
     let cipher = ChaCha20Poly1305::new(session_key.as_ref().into());
     let final_sample_rate = sample_rate_override.unwrap_or(negotiated_rate);
 
-    let config = cpal::StreamConfig { channels, sample_rate: cpal::SampleRate(final_sample_rate), buffer_size: cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES) };
+    let config = cpal::StreamConfig { channels, sample_rate: final_sample_rate, buffer_size: cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES) };
     let sample_rate_sz = final_sample_rate as usize;
     let channels_sz = channels as usize;
     let max_jitter_buffer_samples = (sample_rate_sz * channels_sz * MAX_LATENCY_MS) / 1000;
@@ -663,7 +665,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
     let audio_stream = match device.build_output_stream(
         &config,
         move |data: &mut [f32], _: &_| {
-            let mut frames_needed = data.len();
+            let frames_needed = data.len();
             let mut data_idx = 0;
 
             if let Ok(rx_guard) = rx_primary.try_lock() {
@@ -682,17 +684,22 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                 if let Ok(mut tel) = tel_callback.try_lock() { tel.jitter_buffer_len = jb_guard.len(); }
 
                 if let Ok(mut pb_guard) = pb_primary.try_lock() {
-                    if *pb_guard { if jb_guard.len() >= prebuffer_target_samples { *pb_guard = false; } else { data.fill(0.0); return; } }
+                    if *pb_guard {
+                        if jb_guard.len() >= prebuffer_target_samples {
+                            *pb_guard = false;
+                        } else {
+                            data.fill(0.0);
+                            return;
+                        }
+                    } else if jb_guard.len() < frames_needed {
+                        *pb_guard = true;
+                        data.fill(0.0);
+                        return;
+                    }
                 }
 
-                let take = std::cmp::min(frames_needed, jb_guard.len());
+                let take = frames_needed;
                 for i in 0..take { data[data_idx + i] = jb_guard.pop_front().unwrap(); }
-                data_idx += take;
-                frames_needed -= take;
-
-                if frames_needed > 0 {
-                    for i in 0..frames_needed { data[data_idx + i] = 0.0; }
-                }
             } else { data.fill(0.0); }
         },
         |err| error!(error = %err, "Hardware playback stream exception"),
@@ -710,7 +717,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
             device.build_output_stream(
                 &fallback_config,
                 move |data: &mut [f32], _: &_| {
-                    let mut frames_needed = data.len();
+                    let frames_needed = data.len();
                     let mut data_idx = 0;
 
                     if let Ok(rx_guard) = rx_fallback.try_lock() {
@@ -729,17 +736,22 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                         if let Ok(mut tel) = tel_fallback_cb.try_lock() { tel.jitter_buffer_len = jb_guard.len(); }
 
                         if let Ok(mut pb_guard) = pb_fallback.try_lock() {
-                            if *pb_guard { if jb_guard.len() >= prebuffer_target_samples { *pb_guard = false; } else { data.fill(0.0); return; } }
+                            if *pb_guard {
+                                if jb_guard.len() >= prebuffer_target_samples {
+                                    *pb_guard = false;
+                                } else {
+                                    data.fill(0.0);
+                                    return;
+                                }
+                            } else if jb_guard.len() < frames_needed {
+                                *pb_guard = true;
+                                data.fill(0.0);
+                                return;
+                            }
                         }
 
-                        let take = std::cmp::min(frames_needed, jb_guard.len());
+                        let take = frames_needed;
                         for i in 0..take { data[data_idx + i] = jb_fallback.try_lock().unwrap().pop_front().unwrap(); }
-                        data_idx += take;
-                        frames_needed -= take;
-
-                        if frames_needed > 0 {
-                            for i in 0..frames_needed { data[data_idx + i] = 0.0; }
-                        }
                     } else { data.fill(0.0); }
                 },
                 |err| error!(error = %err, "Hardware playback stream exception"),
