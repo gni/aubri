@@ -20,6 +20,18 @@ Heavy headsets cause physical fatigue during long sessions. I switched to lightw
            +---- Encrypted Stream -------+
 ```
 
+## Install from crates
+
+cli:
+```bash
+cargo install aubri
+```
+
+gui:
+```bash
+cargo install aubri --features gui
+```
+
 ## Build instructions
 
 Compile the headless CLI:
