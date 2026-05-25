@@ -35,7 +35,7 @@ macro_rules! handle_reconnect {
     };
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize)]
 pub struct Telemetry {
     pub is_running: bool,
     pub mode: String,
@@ -78,6 +78,34 @@ pub fn list_devices(host: cpal::Host) {
         }
     } else {
         error!("hardware exception reading output devices");
+    }
+}
+
+pub fn ensure_virtual_sink() {
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("pactl")
+            .args(["list", "short", "sinks"])
+            .output()
+            .ok();
+
+        if let Some(out) = output {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("aubri") {
+                info!("virtual sink 'aubri' already exists. skipping creation.");
+                return;
+            }
+        }
+
+        info!("provisioning virtual audio sink 'aubri' via pactl");
+        let _ = std::process::Command::new("pactl")
+            .args([
+                "load-module",
+                "module-null-sink",
+                "sink_name=aubri",
+                "sink_properties=device.description=aubri_channel"
+            ])
+            .output();
     }
 }
 

@@ -1,3 +1,5 @@
+#![cfg(feature = "gui")]
+
 use crate::Mode;
 use crate::core::Telemetry;
 use eframe::egui;
@@ -29,7 +31,12 @@ impl AppWindow {
         let mut is_server = true;
         let mut bind_addr = "127.0.0.1:8080".to_string();
         let mut secret_key = "JeMateDesVideos01".to_string();
+        
+        #[cfg(target_os = "linux")]
+        let mut cap_dev = "pulse".to_string();
+        #[cfg(not(target_os = "linux"))]
         let mut cap_dev = "System Default Input".to_string();
+        
         let mut play_dev = "System Default Output".to_string();
         let mut target_hz = "Default OS Match".to_string();
         let mut protocol = "UDP".to_string();
@@ -84,6 +91,13 @@ impl AppWindow {
 
     fn scan_devices_if_needed(&mut self) {
         if self.devices_scanned { return; }
+        
+        #[cfg(target_os = "linux")]
+        {
+            crate::core::ensure_virtual_sink();
+            std::env::set_var("PULSE_SOURCE", "aubri.monitor");
+        }
+        
         let host = cpal::default_host();
         if let Ok(devices) = host.input_devices() {
             for d in devices { if let Ok(name) = d.name() { self.available_inputs.push(name); } }
@@ -106,10 +120,19 @@ impl eframe::App for AppWindow {
             if let Some(mode) = self.initial_cli_mode.take() {
                 let tel_clone = Arc::clone(&self.telemetry);
                 std::thread::spawn(move || {
+                    #[cfg(target_os = "linux")]
+                    if let Mode::Server { .. } = mode {
+                        crate::core::ensure_virtual_sink();
+                        std::env::set_var("PULSE_SOURCE", "aubri.monitor");
+                    }
+                    
                     let target_host = cpal::default_host();
                     match mode {
                         Mode::Server { bind, secret, device, sample_rate, protocol, .. } => {
-                            let dev_target = if device.as_deref() == Some("System Default Input") { None } else { device };
+                            let mut dev_target = device;
+                            #[cfg(target_os = "linux")]
+                            if dev_target.is_none() { dev_target = Some("pulse".to_string()); }
+                            
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
                             crate::core::run_server(target_host, &bind, &fallback_secret, dev_target, sample_rate, &protocol, tel_clone);
                         }
@@ -269,6 +292,12 @@ impl eframe::App for AppWindow {
                         let tel_clone = Arc::clone(&self.telemetry);
 
                         std::thread::spawn(move || {
+                            #[cfg(target_os = "linux")]
+                            if mode {
+                                crate::core::ensure_virtual_sink();
+                                std::env::set_var("PULSE_SOURCE", "aubri.monitor");
+                            }
+                            
                             let target_host = cpal::default_host();
                             if mode {
                                 crate::core::run_server(target_host, &bind, &secret, dev, hz_override, &protocol, tel_clone);
