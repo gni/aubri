@@ -15,6 +15,7 @@ pub struct AppWindow {
     protocol: String,
     target_latency: usize,
     target_prebuffer: usize,
+    keep_alive: bool,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     devices_scanned: bool,
@@ -34,6 +35,7 @@ impl AppWindow {
         let mut protocol = "UDP".to_string();
         let mut target_latency = 350;
         let mut target_prebuffer = 120;
+        let mut keep_alive = false;
 
         if let Some(ref mode) = cli_mode {
             match mode {
@@ -45,7 +47,7 @@ impl AppWindow {
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
                     protocol = cli_proto.to_uppercase();
                 }
-                Mode::Client { address, secret, device, sample_rate, protocol: cli_proto, latency, prebuffer, .. } => {
+                Mode::Client { address, secret, device, sample_rate, protocol: cli_proto, latency, prebuffer, keep_alive: cli_keep_alive, .. } => {
                     is_server = false;
                     bind_addr = address.clone();
                     if let Some(s) = secret { secret_key = s.clone(); }
@@ -53,6 +55,7 @@ impl AppWindow {
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
                     if let Some(l) = latency { target_latency = *l; }
                     if let Some(p) = prebuffer { target_prebuffer = *p; }
+                    keep_alive = *cli_keep_alive;
                     protocol = cli_proto.to_uppercase();
                 }
                 _ => {}
@@ -69,6 +72,7 @@ impl AppWindow {
             protocol,
             target_latency,
             target_prebuffer,
+            keep_alive,
             available_inputs: vec!["System Default Input".to_string()],
             available_outputs: vec!["System Default Output".to_string()],
             devices_scanned: false,
@@ -109,10 +113,10 @@ impl eframe::App for AppWindow {
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
                             crate::core::run_server(target_host, &bind, &fallback_secret, dev_target, sample_rate, &protocol, tel_clone);
                         }
-                        Mode::Client { address, secret, device, sample_rate, protocol, latency, prebuffer, .. } => {
+                        Mode::Client { address, secret, device, sample_rate, protocol, latency, prebuffer, keep_alive, .. } => {
                             let dev_target = if device.as_deref() == Some("System Default Output") { None } else { device };
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
-                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, &protocol, latency, prebuffer, tel_clone);
+                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, &protocol, latency, prebuffer, keep_alive, tel_clone);
                         }
                         _ => {}
                     }
@@ -212,6 +216,10 @@ impl eframe::App for AppWindow {
                                         ui.label(egui::RichText::new("Prebuffer Size").color(Color32::from_rgb(180, 190, 200)));
                                         ui.add(egui::Slider::new(&mut self.target_prebuffer, 10..=1000).suffix(" ms").clamp_to_range(true));
                                         ui.end_row();
+
+                                        ui.label(egui::RichText::new("Keep-Alive (Auto Reconnect)").color(Color32::from_rgb(180, 190, 200)));
+                                        ui.checkbox(&mut self.keep_alive, "Enable Watchdog Resilience");
+                                        ui.end_row();
                                     }
                                 });
                         });
@@ -228,6 +236,7 @@ impl eframe::App for AppWindow {
                         let hz_override = self.target_hz.parse::<u32>().ok();
                         let lat_override = Some(self.target_latency);
                         let pre_override = Some(self.target_prebuffer);
+                        let keep_alive = self.keep_alive;
                         
                         let dev = if mode {
                             if self.capture_device == "System Default Input" { None } else { Some(self.capture_device.clone()) }
@@ -242,7 +251,7 @@ impl eframe::App for AppWindow {
                             if mode {
                                 crate::core::run_server(target_host, &bind, &secret, dev, hz_override, &protocol, tel_clone);
                             } else {
-                                crate::core::run_client(target_host, &bind, &secret, dev, hz_override, &protocol, lat_override, pre_override, tel_clone);
+                                crate::core::run_client(target_host, &bind, &secret, dev, hz_override, &protocol, lat_override, pre_override, keep_alive, tel_clone);
                             }
                         });
                     }
