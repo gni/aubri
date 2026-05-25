@@ -170,6 +170,26 @@ fn resolve_output_device(host: &cpal::Host, requested_device: &Option<String>) -
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        if requested_device.is_none() || requested_device.as_deref() == Some("System Default Output") {
+            if let Ok(mut devs) = host.output_devices() {
+                if let Some(d) = devs.find(|d| d.name().unwrap_or_default() == "pipewire") {
+                    if let Ok(cfg) = d.default_output_config() {
+                        return Ok((d, cfg));
+                    }
+                }
+            }
+            if let Ok(mut devs) = host.output_devices() {
+                if let Some(d) = devs.find(|d| d.name().unwrap_or_default() == "pulse") {
+                    if let Ok(cfg) = d.default_output_config() {
+                        return Ok((d, cfg));
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(d) = host.default_output_device() {
         if let Ok(cfg) = d.default_output_config() {
             return Ok((d, cfg));
