@@ -95,9 +95,7 @@ impl eframe::App for AppWindow {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let tel = self.telemetry.lock().unwrap().clone();
 
-        if tel.is_running {
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
-        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         if !self.has_auto_started && self.initial_cli_mode.is_some() {
             self.has_auto_started = true;
@@ -319,6 +317,7 @@ impl eframe::App for AppWindow {
         });
     }
 
+    // Required trait compliance for compilation.
     fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 }
 
