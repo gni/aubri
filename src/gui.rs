@@ -13,6 +13,8 @@ pub struct AppWindow {
     playback_device: String,
     target_hz: String,
     protocol: String,
+    target_latency: usize,
+    target_prebuffer: usize,
     available_inputs: Vec<String>,
     available_outputs: Vec<String>,
     devices_scanned: bool,
@@ -30,6 +32,8 @@ impl AppWindow {
         let mut play_dev = "System Default Output".to_string();
         let mut target_hz = "Default OS Match".to_string();
         let mut protocol = "UDP".to_string();
+        let mut target_latency = 350;
+        let mut target_prebuffer = 120;
 
         if let Some(ref mode) = cli_mode {
             match mode {
@@ -41,12 +45,14 @@ impl AppWindow {
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
                     protocol = cli_proto.to_uppercase();
                 }
-                Mode::Client { address, secret, device, sample_rate, protocol: cli_proto, .. } => {
+                Mode::Client { address, secret, device, sample_rate, protocol: cli_proto, latency, prebuffer, .. } => {
                     is_server = false;
                     bind_addr = address.clone();
                     if let Some(s) = secret { secret_key = s.clone(); }
                     if let Some(d) = device { play_dev = d.clone(); }
                     if let Some(hz) = sample_rate { target_hz = hz.to_string(); }
+                    if let Some(l) = latency { target_latency = *l; }
+                    if let Some(p) = prebuffer { target_prebuffer = *p; }
                     protocol = cli_proto.to_uppercase();
                 }
                 _ => {}
@@ -61,6 +67,8 @@ impl AppWindow {
             playback_device: play_dev,
             target_hz,
             protocol,
+            target_latency,
+            target_prebuffer,
             available_inputs: vec!["System Default Input".to_string()],
             available_outputs: vec!["System Default Output".to_string()],
             devices_scanned: false,
@@ -103,15 +111,19 @@ impl eframe::App for AppWindow {
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
                             crate::core::run_server(target_host, &bind, &fallback_secret, dev_target, sample_rate, &protocol, tel_clone);
                         }
-                        Mode::Client { address, secret, device, sample_rate, protocol, .. } => {
+                        Mode::Client { address, secret, device, sample_rate, protocol, latency, prebuffer, .. } => {
                             let dev_target = if device.as_deref() == Some("System Default Output") { None } else { device };
                             let fallback_secret = secret.unwrap_or_else(|| "JeMateDesVideos01".to_string());
-                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, &protocol, tel_clone);
+                            crate::core::run_client(target_host, &address, &fallback_secret, dev_target, sample_rate, &protocol, latency, prebuffer, tel_clone);
                         }
                         _ => {}
                     }
                 });
             }
+        }
+
+        if self.target_prebuffer > self.target_latency {
+            self.target_prebuffer = self.target_latency;
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -181,6 +193,7 @@ impl eframe::App for AppWindow {
                                                     ui.selectable_value(&mut self.capture_device, dev.clone(), dev);
                                                 }
                                             });
+                                        ui.end_row();
                                     } else {
                                         ui.label(egui::RichText::new("Playback Hardware").color(Color32::from_rgb(180, 190, 200)));
                                         egui::ComboBox::from_id_source("playback_dropdown")
@@ -192,8 +205,16 @@ impl eframe::App for AppWindow {
                                                     ui.selectable_value(&mut self.playback_device, dev.clone(), dev);
                                                 }
                                             });
+                                        ui.end_row();
+
+                                        ui.label(egui::RichText::new("Latency Tolerance").color(Color32::from_rgb(180, 190, 200)));
+                                        ui.add(egui::Slider::new(&mut self.target_latency, 50..=2000).suffix(" ms").clamp_to_range(true));
+                                        ui.end_row();
+
+                                        ui.label(egui::RichText::new("Prebuffer Size").color(Color32::from_rgb(180, 190, 200)));
+                                        ui.add(egui::Slider::new(&mut self.target_prebuffer, 10..=1000).suffix(" ms").clamp_to_range(true));
+                                        ui.end_row();
                                     }
-                                    ui.end_row();
                                 });
                         });
 
@@ -207,6 +228,8 @@ impl eframe::App for AppWindow {
                         let secret = self.secret_key.clone();
                         let protocol = self.protocol.clone();
                         let hz_override = self.target_hz.parse::<u32>().ok();
+                        let lat_override = Some(self.target_latency);
+                        let pre_override = Some(self.target_prebuffer);
                         
                         let dev = if mode {
                             if self.capture_device == "System Default Input" { None } else { Some(self.capture_device.clone()) }
@@ -221,7 +244,7 @@ impl eframe::App for AppWindow {
                             if mode {
                                 crate::core::run_server(target_host, &bind, &secret, dev, hz_override, &protocol, tel_clone);
                             } else {
-                                crate::core::run_client(target_host, &bind, &secret, dev, hz_override, &protocol, tel_clone);
+                                crate::core::run_client(target_host, &bind, &secret, dev, hz_override, &protocol, lat_override, pre_override, tel_clone);
                             }
                         });
                     }
@@ -326,6 +349,7 @@ pub fn launch_gui(initial_mode: Option<Mode>) {
             style.visuals = visuals;
             style.spacing.item_spacing = vec2(12.0, 12.0);
             style.spacing.button_padding = vec2(12.0, 8.0);
+            style.spacing.slider_width = 250.0;
             cc.egui_ctx.set_style(style);
 
             Ok(Box::new(AppWindow::new(initial_mode)))

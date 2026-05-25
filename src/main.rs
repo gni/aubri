@@ -52,6 +52,12 @@ pub enum Mode {
         
         #[arg(short = 'P', long, default_value = "udp")]
         protocol: String,
+        
+        #[arg(short = 'l', long)]
+        latency: Option<usize>,
+        
+        #[arg(short = 'p', long)]
+        prebuffer: Option<usize>,
     },
     ListDevices,
     Gui,
@@ -99,11 +105,11 @@ fn main() {
                 gui::launch_gui(Some(Mode::Server { bind, secret: Some(final_secret), device, headless, sample_rate, protocol }));
             }
         }
-        Some(Mode::Client { address, secret, device, headless, sample_rate, protocol }) => {
+        Some(Mode::Client { address, secret, device, headless, sample_rate, protocol, latency, prebuffer }) => {
             let final_secret = resolve_secret(secret, headless);
             if headless {
                 let tel = std::sync::Arc::new(std::sync::Mutex::new(core::Telemetry::default()));
-                core::run_client(host, &address, &final_secret, device, sample_rate, &protocol, tel.clone());
+                core::run_client(host, &address, &final_secret, device, sample_rate, &protocol, latency, prebuffer, tel.clone());
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     if let Ok(guard) = tel.lock() {
@@ -111,7 +117,7 @@ fn main() {
                     }
                 }
             } else {
-                gui::launch_gui(Some(Mode::Client { address, secret: Some(final_secret), device, headless, sample_rate, protocol }));
+                gui::launch_gui(Some(Mode::Client { address, secret: Some(final_secret), device, headless, sample_rate, protocol, latency, prebuffer }));
             }
         }
         Some(Mode::ListDevices) => {

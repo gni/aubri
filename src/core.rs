@@ -11,8 +11,6 @@ use tracing::{error, info, warn};
 
 const KDF_CONTEXT: &str = "aubri_p2p_audio_v2";
 const MAX_QUEUE_DEPTH: usize = 128;
-const MAX_LATENCY_MS: usize = 350;
-const PREBUFFER_MS: usize = 120;
 const HARDWARE_BUFFER_FRAMES: u32 = 256;
 const MAX_SAFE_PAYLOAD_BYTES: usize = 16384;
 
@@ -150,11 +148,11 @@ pub fn run_server(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     }
 }
 
-pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, protocol: &str, telemetry: Arc<Mutex<Telemetry>>) {
+pub fn run_client(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, protocol: &str, latency: Option<usize>, prebuffer: Option<usize>, telemetry: Arc<Mutex<Telemetry>>) {
     if protocol.to_lowercase() == "tcp" {
-        run_client_tcp(host, address, secret, device_name, sample_rate_override, telemetry);
+        run_client_tcp(host, address, secret, device_name, sample_rate_override, latency, prebuffer, telemetry);
     } else {
-        run_client_udp(host, address, secret, device_name, sample_rate_override, telemetry);
+        run_client_udp(host, address, secret, device_name, sample_rate_override, latency, prebuffer, telemetry);
     }
 }
 
@@ -266,7 +264,7 @@ fn run_server_tcp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session closed.".to_string(); }
 }
 
-fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
+fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, latency: Option<usize>, prebuffer: Option<usize>, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, _) = match resolve_output_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
@@ -330,10 +328,13 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         buffer_size: cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES),
     };
 
+    let actual_latency = latency.unwrap_or(350);
+    let actual_prebuffer = prebuffer.unwrap_or(120);
+
     let sample_rate_sz = final_sample_rate as usize;
     let channels_sz = channels as usize;
-    let max_jitter_buffer_samples = (sample_rate_sz * channels_sz * MAX_LATENCY_MS) / 1000;
-    let prebuffer_target_samples = (sample_rate_sz * channels_sz * PREBUFFER_MS) / 1000;
+    let max_jitter_buffer_samples = (sample_rate_sz * channels_sz * actual_latency) / 1000;
+    let prebuffer_target_samples = (sample_rate_sz * channels_sz * actual_prebuffer) / 1000;
 
     if let Ok(mut tel) = telemetry.lock() {
         tel.sample_rate = final_sample_rate;
@@ -356,7 +357,7 @@ fn run_client_tcp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         &config,
         move |data: &mut [f32], _: &_| {
             let frames_needed = data.len();
-            let mut data_idx = 0;
+            let data_idx = 0;
 
             if let Ok(rx_guard) = rx_primary.try_lock() {
                 while let Ok(decrypted_bytes) = rx_guard.try_recv() {
@@ -570,7 +571,7 @@ fn run_server_udp(host: cpal::Host, bind: &str, secret: &str, device_name: Optio
     if let Ok(mut tel) = telemetry.lock() { tel.is_running = false; tel.status = "Session terminated contextually.".to_string(); }
 }
 
-fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, telemetry: Arc<Mutex<Telemetry>>) {
+fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Option<String>, sample_rate_override: Option<u32>, latency: Option<usize>, prebuffer: Option<usize>, telemetry: Arc<Mutex<Telemetry>>) {
     let (device, _) = match resolve_output_device(&host, &device_name) {
         Ok(res) => res,
         Err(e) => {
@@ -640,10 +641,14 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
     let final_sample_rate = sample_rate_override.unwrap_or(negotiated_rate);
 
     let config = cpal::StreamConfig { channels, sample_rate: final_sample_rate, buffer_size: cpal::BufferSize::Fixed(HARDWARE_BUFFER_FRAMES) };
+    
+    let actual_latency = latency.unwrap_or(350);
+    let actual_prebuffer = prebuffer.unwrap_or(120);
+
     let sample_rate_sz = final_sample_rate as usize;
     let channels_sz = channels as usize;
-    let max_jitter_buffer_samples = (sample_rate_sz * channels_sz * MAX_LATENCY_MS) / 1000;
-    let prebuffer_target_samples = (sample_rate_sz * channels_sz * PREBUFFER_MS) / 1000;
+    let max_jitter_buffer_samples = (sample_rate_sz * channels_sz * actual_latency) / 1000;
+    let prebuffer_target_samples = (sample_rate_sz * channels_sz * actual_prebuffer) / 1000;
 
     if let Ok(mut tel) = telemetry.lock() {
         tel.sample_rate = final_sample_rate;
@@ -666,7 +671,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
         &config,
         move |data: &mut [f32], _: &_| {
             let frames_needed = data.len();
-            let mut data_idx = 0;
+            let data_idx = 0;
 
             if let Ok(rx_guard) = rx_primary.try_lock() {
                 while let Ok(decrypted_bytes) = rx_guard.try_recv() {
@@ -718,7 +723,7 @@ fn run_client_udp(host: cpal::Host, address: &str, secret: &str, device_name: Op
                 &fallback_config,
                 move |data: &mut [f32], _: &_| {
                     let frames_needed = data.len();
-                    let mut data_idx = 0;
+                    let data_idx = 0;
 
                     if let Ok(rx_guard) = rx_fallback.try_lock() {
                         while let Ok(decrypted_bytes) = rx_guard.try_recv() {
